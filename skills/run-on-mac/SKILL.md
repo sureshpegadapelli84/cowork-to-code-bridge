@@ -52,6 +52,8 @@ If the user wants to run something not yet whitelisted:
 3. Tell them to save it as `~/.cowork-to-code-bridge/scripts/<name>.sh` on their Mac and `chmod +x` it.
 4. Once they confirm it's saved, call it via `call_remote("scripts/<name>.sh", ...)`.
 
+If the bridge isn't installed yet (`daemon_alive()` returns `False` and there's no `~/.cowork-to-code-bridge/` on the Mac), trigger the `cowork-to-code-bridge-setup` skill. The user installs via the Claude Code plugin marketplace: `/plugin marketplace add abhinaykrupa/cowork-bridge-marketplace` then `/plugin install cowork-to-code-bridge@cowork-bridge-marketplace`, followed by the one-line `install.sh` curl on their Mac. The setup skill drives that flow end to end.
+
 Pre-installed scripts (always available after `install.sh`):
 
 - `scripts/ping.sh` — health check, echoes OK + pwd + timestamp
