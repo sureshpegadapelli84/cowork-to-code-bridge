@@ -120,7 +120,40 @@ fi
 
 # Resolve where pip put the console scripts (per-user "scripts" path).
 # Example on Mac: ~/Library/Python/3.12/bin
-USER_SCRIPTS_DIR=$("$PY" -c "import sysconfig; print(sysconfig.get_path('scripts', f'{sysconfig.get_default_scheme()}_user'))")
+# Python 3.10+ exposes `get_preferred_scheme('user')`; we fall back to manual
+# probes for older interpreters or oddly-configured frameworks (where
+# get_default_scheme returns e.g. 'osx_framework_library' which has no _user variant).
+USER_SCRIPTS_DIR=$("$PY" - <<'PYEOF'
+import sysconfig, sys, os
+# Preferred: 3.10+ API
+try:
+    scheme = sysconfig.get_preferred_scheme('user')
+    print(sysconfig.get_path('scripts', scheme))
+    sys.exit(0)
+except Exception:
+    pass
+# Fallback 1: '<default>_user' (works when the default scheme has a _user variant)
+try:
+    scheme = f"{sysconfig.get_default_scheme()}_user"
+    if scheme in sysconfig.get_scheme_names():
+        print(sysconfig.get_path('scripts', scheme))
+        sys.exit(0)
+except Exception:
+    pass
+# Fallback 2: pick any *_user scheme that exists
+for s in sysconfig.get_scheme_names():
+    if s.endswith('_user'):
+        print(sysconfig.get_path('scripts', s))
+        sys.exit(0)
+# Last resort: derive from site.USER_BASE
+import site
+print(os.path.join(site.getuserbase(), 'bin'))
+PYEOF
+)
+if [[ -z "$USER_SCRIPTS_DIR" ]]; then
+  c_red "  ✗ could not resolve user scripts dir from $PY"
+  exit 1
+fi
 c_green "  ✓ user scripts dir: $USER_SCRIPTS_DIR"
 
 # ─── 3. Bridge directory layout ──────────────────────────────────────────────
