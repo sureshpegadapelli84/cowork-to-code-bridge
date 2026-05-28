@@ -18,11 +18,21 @@ if command -v cowork-to-code-bridge-uninstall >/dev/null 2>&1; then
   exec cowork-to-code-bridge-uninstall "$@"
 fi
 
-# Try locating it via the same python that may have installed it
+# Try locating it via the same python that may have installed it.
+# Probe newest first; only `import` gates pass so the picked interpreter is
+# guaranteed to be the one that owns the package.
 for PY in python3.13 python3.12 python3.11 python3.10 python3; do
   if command -v "$PY" >/dev/null 2>&1 && \
      "$PY" -c "import cowork_to_code_bridge.uninstall" 2>/dev/null; then
     exec "$PY" -m cowork_to_code_bridge.uninstall "$@"
+  fi
+done
+
+# Also try the per-user scripts dir directly, in case PATH is missing it.
+for PYV in 3.13 3.12 3.11 3.10; do
+  cand="$HOME/Library/Python/$PYV/bin/cowork-to-code-bridge-uninstall"
+  if [[ -x "$cand" ]]; then
+    exec "$cand" "$@"
   fi
 done
 

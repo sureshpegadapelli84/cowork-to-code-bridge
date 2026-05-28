@@ -5,19 +5,24 @@
 #   curl -fsSL https://raw.githubusercontent.com/abhinaykrupa/cowork-to-code-bridge/main/install.sh | bash
 #
 # What this does:
-#   1. Verifies Python 3.10+ and pip are available.
-#   2. pip-installs the cowork-to-code-bridge package (from PyPI if published,
-#      else from GitHub main).
+#   1. Locates a usable Python 3.10+ interpreter (probes python3.13 → 3.10).
+#   2. pip-installs the cowork-to-code-bridge package (PyPI, fallback GitHub main).
 #   3. Creates ~/.cowork-to-code-bridge/ with queue/, results/, processed/, scripts/.
 #   4. Generates BRIDGE_TOKEN and writes it to ~/.cowork-to-code-bridge/.env.
-#   5. Installs the ping.sh and (optionally) hello.sh starter scripts.
-#   6. Installs a launchd plist so the daemon auto-starts on login.
-#   7. Starts the daemon now.
-#   8. Prints the snippet to paste into Cowork.
+#   5. Installs ping.sh + hello.sh starter scripts.
+#   6. Installs a launchd plist with absolute Python interpreter path so the
+#      daemon auto-starts on login and survives reboots.
+#   7. Bootstraps the daemon via `launchctl bootstrap` (fallback `load -w`).
+#   8. Verifies daemon-up heartbeat (20s window).
+#   9. Detects whether the user's PATH includes the per-user pip scripts dir
+#      and offers to append it to ~/.zshrc.
+#  10. Prints the Cowork paste snippet.
 #
-# Re-runnable: skips already-completed steps. Will NOT overwrite an existing token.
+# Re-runnable: skips already-completed steps. Regenerates BRIDGE_TOKEN if the
+# existing value is empty.
 
 set -euo pipefail
+trap 'echo "✗ Install failed at line $LINENO. Run cowork-to-code-bridge-uninstall (or: curl -fsSL https://raw.githubusercontent.com/abhinaykrupa/cowork-to-code-bridge/main/daemon/uninstall.sh | bash) to clean up partial state." >&2' ERR
 
 REPO="abhinaykrupa/cowork-to-code-bridge"
 BRIDGE_ROOT="$HOME/.cowork-to-code-bridge"
@@ -26,46 +31,97 @@ PACKAGE="cowork-to-code-bridge"
 DAEMON_LOG="$BRIDGE_ROOT/daemon.log"
 DAEMON_ERR="$BRIDGE_ROOT/daemon.err"
 
-c_green() { printf "\033[0;32m%s\033[0m\n" "$1"; }
+c_green()  { printf "\033[0;32m%s\033[0m\n" "$1"; }
 c_yellow() { printf "\033[0;33m%s\033[0m\n" "$1"; }
-c_red() { printf "\033[0;31m%s\033[0m\n" "$1"; }
-step() { printf "\n\033[1;36m==> %s\033[0m\n" "$1"; }
+c_red()    { printf "\033[0;31m%s\033[0m\n" "$1"; }
+step()     { printf "\n\033[1;36m==> %s\033[0m\n" "$1"; }
 
-# ─── 1. Preflight ────────────────────────────────────────────────────────────
-step "Checking prerequisites"
+# ─── 1. Preflight: locate a Python 3.10+ interpreter ─────────────────────────
+step "Locating Python 3.10+ interpreter"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  c_red "  ✗ python3 not found. Install Python 3.10+ first:"
+PY=""
+PY_VER=""
+for candidate in python3.13 python3.12 python3.11 python3.10; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    cand_path="$(command -v "$candidate")"
+    # Resolve to absolute, dereferenced path so launchd doesn't depend on PATH.
+    if command -v readlink >/dev/null 2>&1; then
+      resolved="$(readlink -f "$cand_path" 2>/dev/null || echo "$cand_path")"
+    else
+      resolved="$cand_path"
+    fi
+    ver=$("$resolved" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "")
+    if [[ -z "$ver" ]]; then continue; fi
+    major=$(echo "$ver" | cut -d. -f1)
+    minor=$(echo "$ver" | cut -d. -f2)
+    if [[ "$major" -eq 3 ]] && [[ "$minor" -ge 10 ]]; then
+      PY="$resolved"
+      PY_VER="$ver"
+      break
+    fi
+  fi
+done
+
+if [[ -z "$PY" ]]; then
+  c_red "  ✗ No Python 3.10+ interpreter found."
+  echo
+  echo "  Apple's stock /usr/bin/python3 is too old (3.8) and is intentionally"
+  echo "  ignored here. Install a real Python via Homebrew, then re-run this:"
+  echo
   echo "    brew install python@3.12"
+  echo
+  echo "  After install, verify it's on PATH:"
+  echo "    command -v python3.12"
   exit 1
 fi
+export PY
+c_green "  ✓ using $PY (Python $PY_VER)"
 
-PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
-PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
-if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 10 ]]; }; then
-  c_red "  ✗ Python $PY_VER is too old. Need 3.10+."
-  exit 1
+# pip sanity
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  c_yellow "  ! pip missing for $PY — bootstrapping with ensurepip"
+  "$PY" -m ensurepip --upgrade || {
+    c_red "  ✗ ensurepip failed. Install pip manually for $PY and re-run."
+    exit 1
+  }
 fi
-c_green "  ✓ python3 $PY_VER"
+c_green "  ✓ pip available for $PY"
 
-if ! command -v pip3 >/dev/null 2>&1 && ! python3 -m pip --version >/dev/null 2>&1; then
-  c_red "  ✗ pip not available. Run: python3 -m ensurepip --upgrade"
-  exit 1
-fi
-c_green "  ✓ pip"
-
-# ─── 2. Install package ──────────────────────────────────────────────────────
+# ─── 2. Install package (handle PEP 668 externally-managed) ──────────────────
 step "Installing $PACKAGE"
 
-# Try PyPI first; fall back to GitHub main if not yet published.
-if python3 -m pip install --user --upgrade "$PACKAGE" 2>/dev/null; then
+# pip_install_user <args...> — try --user, retry with --break-system-packages
+# if PEP 668 blocks. Returns non-zero only if both attempts fail.
+pip_install_user() {
+  local out rc
+  out=$("$PY" -m pip install --user --upgrade "$@" 2>&1) && rc=0 || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    return 0
+  fi
+  # PEP 668 marker: "externally-managed-environment"
+  if echo "$out" | grep -qi "externally-managed-environment"; then
+    c_yellow "  ! PEP 668: this Python is marked externally-managed."
+    c_yellow "    Retrying with --break-system-packages (per-user install, won't touch system site-packages)."
+    "$PY" -m pip install --user --break-system-packages --upgrade "$@"
+    return $?
+  fi
+  # Some other failure — surface the original output and bubble up.
+  echo "$out" >&2
+  return $rc
+}
+
+if pip_install_user "$PACKAGE" 2>/dev/null; then
   c_green "  ✓ installed from PyPI"
 else
   c_yellow "  PyPI install failed (package may not be published yet) — falling back to GitHub"
-  python3 -m pip install --user --upgrade "git+https://github.com/$REPO.git@main"
+  pip_install_user "git+https://github.com/$REPO.git@main"
   c_green "  ✓ installed from GitHub main"
 fi
+
+# Resolve where pip put the console scripts (per-user "scripts" path).
+# Example on Mac: ~/Library/Python/3.12/bin
+USER_SCRIPTS_DIR=$("$PY" -c "import sysconfig; print(sysconfig.get_path('scripts', f'{sysconfig.get_default_scheme()}_user'))")
+c_green "  ✓ user scripts dir: $USER_SCRIPTS_DIR"
 
 # ─── 3. Bridge directory layout ──────────────────────────────────────────────
 step "Setting up $BRIDGE_ROOT"
@@ -75,14 +131,30 @@ c_green "  ✓ directories created"
 # ─── 4. Token ────────────────────────────────────────────────────────────────
 step "Generating bridge token"
 ENV_FILE="$BRIDGE_ROOT/.env"
+
+existing_token=""
 if [[ -f "$ENV_FILE" ]] && grep -q "^BRIDGE_TOKEN=" "$ENV_FILE"; then
-  c_yellow "  → BRIDGE_TOKEN already exists in $ENV_FILE — keeping existing token"
-  BRIDGE_TOKEN=$(grep "^BRIDGE_TOKEN=" "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+  existing_token=$(grep "^BRIDGE_TOKEN=" "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]')
+fi
+
+if [[ -n "$existing_token" ]]; then
+  BRIDGE_TOKEN="$existing_token"
+  c_yellow "  → BRIDGE_TOKEN already set in $ENV_FILE — keeping existing token"
 else
+  if [[ -f "$ENV_FILE" ]] && grep -q "^BRIDGE_TOKEN=" "$ENV_FILE"; then
+    c_yellow "  → existing BRIDGE_TOKEN line is empty — regenerating"
+    # Strip the empty line; we'll append a fresh one.
+    tmp="$(mktemp)"
+    grep -v "^BRIDGE_TOKEN=" "$ENV_FILE" > "$tmp" || true
+    mv "$tmp" "$ENV_FILE"
+  fi
   BRIDGE_TOKEN=$(openssl rand -hex 16)
   {
     echo "BRIDGE_TOKEN=$BRIDGE_TOKEN"
-    echo "BRIDGE_ROOT=$BRIDGE_ROOT"
+    # Only add BRIDGE_ROOT if not already present.
+    if ! [[ -f "$ENV_FILE" ]] || ! grep -q "^BRIDGE_ROOT=" "$ENV_FILE"; then
+      echo "BRIDGE_ROOT=$BRIDGE_ROOT"
+    fi
   } >> "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   c_green "  ✓ token generated and saved (chmod 600)"
@@ -110,58 +182,80 @@ c_green "  ✓ ping.sh + hello.sh installed in $BRIDGE_ROOT/scripts/"
 # ─── 6. launchd plist ────────────────────────────────────────────────────────
 step "Installing launchd agent (auto-start on login)"
 
-# Find the daemon entry point. Prefer the installed console script.
-DAEMON_CMD=""
-if command -v cowork-to-code-bridge-daemon >/dev/null 2>&1; then
-  DAEMON_CMD="$(command -v cowork-to-code-bridge-daemon)"
-elif python3 -c "import cowork_to_code_bridge.daemon" 2>/dev/null; then
-  DAEMON_CMD="$(command -v python3) -m cowork_to_code_bridge.daemon"
+# Resolve the daemon entry point to an ABSOLUTE path. Prefer the installed
+# console script under the per-user scripts dir (independent of PATH).
+DAEMON_ARGS=()
+CONSOLE_SCRIPT="$USER_SCRIPTS_DIR/cowork-to-code-bridge-daemon"
+
+if [[ -x "$CONSOLE_SCRIPT" ]]; then
+  DAEMON_ARGS=("$CONSOLE_SCRIPT")
+elif command -v cowork-to-code-bridge-daemon >/dev/null 2>&1; then
+  # On PATH but not under user scripts dir (e.g. system-wide install).
+  DAEMON_ARGS=("$(command -v cowork-to-code-bridge-daemon)")
+elif "$PY" -c "import cowork_to_code_bridge.daemon" 2>/dev/null; then
+  # Fallback: invoke as a module via the resolved Python interpreter.
+  DAEMON_ARGS=("$PY" "-m" "cowork_to_code_bridge.daemon")
 else
   c_red "  ✗ cowork-to-code-bridge daemon module not found after install"
   exit 1
 fi
-c_green "  ✓ daemon entry: $DAEMON_CMD"
+c_green "  ✓ daemon entry: ${DAEMON_ARGS[*]}"
 
 mkdir -p "$(dirname "$PLIST")"
-cat > "$PLIST" <<PLISTXML
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>dev.cowork-to-code-bridge.daemon</string>
-  <key>ProgramArguments</key>
-  <array>
-PLISTXML
-for word in $DAEMON_CMD; do
-  echo "    <string>$word</string>" >> "$PLIST"
-done
-cat >> "$PLIST" <<PLISTXML
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>BRIDGE_ROOT</key><string>$BRIDGE_ROOT</string>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$DAEMON_LOG</string>
-  <key>StandardErrorPath</key><string>$DAEMON_ERR</string>
-  <key>WorkingDirectory</key><string>$BRIDGE_ROOT</string>
-</dict>
-</plist>
-PLISTXML
+{
+  echo '<?xml version="1.0" encoding="UTF-8"?>'
+  echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+  echo '<plist version="1.0">'
+  echo '<dict>'
+  echo '  <key>Label</key><string>dev.cowork-to-code-bridge.daemon</string>'
+  echo '  <key>ProgramArguments</key>'
+  echo '  <array>'
+  for arg in "${DAEMON_ARGS[@]}"; do
+    # Escape XML special chars in arg (just in case a path has & < >).
+    safe=$(printf '%s' "$arg" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+    echo "    <string>$safe</string>"
+  done
+  echo '  </array>'
+  echo '  <key>EnvironmentVariables</key>'
+  echo '  <dict>'
+  echo "    <key>BRIDGE_ROOT</key><string>$BRIDGE_ROOT</string>"
+  echo "    <key>PATH</key><string>$USER_SCRIPTS_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"
+  echo '  </dict>'
+  echo '  <key>RunAtLoad</key><true/>'
+  echo '  <key>KeepAlive</key><true/>'
+  echo "  <key>StandardOutPath</key><string>$DAEMON_LOG</string>"
+  echo "  <key>StandardErrorPath</key><string>$DAEMON_ERR</string>"
+  echo "  <key>WorkingDirectory</key><string>$BRIDGE_ROOT</string>"
+  echo '</dict>'
+  echo '</plist>'
+} > "$PLIST"
+c_green "  ✓ plist written: $PLIST"
 
-# Reload if already loaded
-if launchctl list 2>/dev/null | grep -q "dev.cowork-to-code-bridge.daemon"; then
-  c_yellow "  → unloading existing agent"
-  launchctl unload "$PLIST" 2>/dev/null || true
+# Tear down any prior registration before re-loading.
+UID_NUM="$(id -u)"
+DOMAIN="gui/$UID_NUM"
+LABEL="dev.cowork-to-code-bridge.daemon"
+
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  c_yellow "  → bootout existing agent"
+  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 fi
-launchctl load -w "$PLIST"
+# Legacy load -w cleanup for older installs.
+launchctl unload "$PLIST" 2>/dev/null || true
+
+if launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; then
+  c_green "  ✓ launchctl bootstrap $DOMAIN succeeded"
+else
+  c_yellow "  ! launchctl bootstrap failed — falling back to legacy load -w"
+  launchctl load -w "$PLIST"
+fi
+launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
 sleep 2
 
 # ─── 7. Verify daemon is running ─────────────────────────────────────────────
 step "Verifying daemon"
-if launchctl list | grep -q "dev.cowork-to-code-bridge.daemon"; then
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || \
+   launchctl list 2>/dev/null | grep -q "$LABEL"; then
   c_green "  ✓ daemon registered with launchd"
 else
   c_red "  ✗ daemon failed to register"
@@ -170,21 +264,63 @@ else
   exit 1
 fi
 
-# Wait for the daemon to log its first heartbeat
-for i in 1 2 3 4 5; do
+# Wait up to 20s for the daemon to log its first heartbeat (cold caches are slow).
+daemon_up=0
+for i in $(seq 1 20); do
   if [[ -f "$DAEMON_LOG" ]] && grep -q "daemon up" "$DAEMON_LOG" 2>/dev/null; then
-    c_green "  ✓ daemon log shows 'daemon up'"
+    c_green "  ✓ daemon log shows 'daemon up' (after ${i}s)"
+    daemon_up=1
     break
   fi
   sleep 1
 done
 
-if ! grep -q "daemon up" "$DAEMON_LOG" 2>/dev/null; then
-  c_yellow "  ! daemon hasn't logged startup yet — checking error log"
-  tail -10 "$DAEMON_ERR" 2>/dev/null || true
+if [[ "$daemon_up" -eq 0 ]]; then
+  c_yellow "  ! daemon hasn't logged 'daemon up' within 20s — last stderr lines:"
+  tail -20 "$DAEMON_ERR" 2>/dev/null || true
+  c_yellow "    (Not aborting — the daemon may still come up. Check $DAEMON_LOG manually.)"
 fi
 
-# ─── 8. Print Cowork paste snippet ───────────────────────────────────────────
+# ─── 8. PATH hygiene ─────────────────────────────────────────────────────────
+step "Checking PATH for $USER_SCRIPTS_DIR"
+
+path_has_dir=0
+case ":$PATH:" in
+  *":$USER_SCRIPTS_DIR:"*) path_has_dir=1 ;;
+esac
+
+ZSHRC="$HOME/.zshrc"
+PATH_LINE="export PATH=\"$USER_SCRIPTS_DIR:\$PATH\"  # cowork-to-code-bridge"
+
+if [[ "$path_has_dir" -eq 1 ]]; then
+  c_green "  ✓ $USER_SCRIPTS_DIR already on PATH"
+else
+  c_yellow "  ! $USER_SCRIPTS_DIR is NOT on your PATH."
+  echo "    The 'cowork-to-code-bridge-uninstall' and 'cowork-to-code-bridge-daemon'"
+  echo "    commands live there. To use them by bare name, add this to ~/.zshrc:"
+  echo
+  echo "      $PATH_LINE"
+  echo
+
+  # Skip the prompt entirely when stdin isn't a TTY (e.g. curl | bash).
+  if [[ -t 0 ]]; then
+    read -r -p "  Append this line to $ZSHRC now? [y/N] " ans
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+      if [[ -f "$ZSHRC" ]] && grep -Fq "$USER_SCRIPTS_DIR" "$ZSHRC"; then
+        c_yellow "    (already referenced in $ZSHRC — not appending duplicate)"
+      else
+        printf '\n# Added by cowork-to-code-bridge installer\n%s\n' "$PATH_LINE" >> "$ZSHRC"
+        c_green "  ✓ appended to $ZSHRC — open a new terminal or run: source $ZSHRC"
+      fi
+    else
+      c_yellow "    skipped — add the export line manually when convenient."
+    fi
+  else
+    c_yellow "  (non-interactive shell — not prompting. Add the line above manually.)"
+  fi
+fi
+
+# ─── 9. Print Cowork paste snippet ───────────────────────────────────────────
 step "DONE. Bridge is installed and running."
 
 cat <<DONE
@@ -197,17 +333,23 @@ Cowork will detect the bridge is ready, install the plugin side, and
 walk you through the rest.
 
 Manual verification (optional):
-  launchctl list | grep cowork-to-code-bridge   # should show the daemon
-  cat $ENV_FILE                                 # token + bridge root
-  tail -f $DAEMON_LOG                           # live daemon output
+  launchctl print gui/$UID_NUM/$LABEL   # full agent state
+  cat $ENV_FILE                                       # token + bridge root
+  tail -f $DAEMON_LOG                                 # live daemon output
+
+Python interpreter:  $PY  ($PY_VER)
+User scripts dir:    $USER_SCRIPTS_DIR
 
 Uninstall (one command — undoes everything this installer did):
+  $USER_SCRIPTS_DIR/cowork-to-code-bridge-uninstall
+
+Or, if $USER_SCRIPTS_DIR is on your PATH:
   cowork-to-code-bridge-uninstall
 
-Or non-interactively:
+Non-interactively:
   cowork-to-code-bridge-uninstall --yes
 
-If 'cowork-to-code-bridge-uninstall' isn't on your PATH:
+If neither path is available:
   curl -fsSL https://raw.githubusercontent.com/$REPO/main/daemon/uninstall.sh | bash
 
 DONE
