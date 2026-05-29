@@ -309,6 +309,14 @@ Three protections:
 
 If you want even more conservative: review every Claude suggestion before agreeing to run it.
 
+**Q: What happens if my Mac crashes or reboots while a script is running?**
+The daemon is crash-safe. On the next startup it auto-restarts via launchd, replays an append-only journal, and:
+- Any script that was in-flight when the crash happened is reported as `exit_code=-4` ("indeterminate") rather than silently re-run. So a half-finished `git push` won't fire twice.
+- Any script that *completed* before the crash keeps its result intact.
+- Cowork sessions that retry with the same `idempotency_key` get the cached result instead of triggering a duplicate run — the cache survives reboots.
+
+For non-idempotent operations (deploys, money-moving, destructive git ops), pass `idempotency_key="..."` to `call_remote`. See `docs/architecture.md` for the full state machine.
+
 ---
 
 ## Status & contributing

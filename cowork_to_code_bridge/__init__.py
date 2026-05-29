@@ -7,5 +7,5 @@ from __future__ import annotations
 
 from .client import call_remote, daemon_alive
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["call_remote", "daemon_alive", "__version__"]

@@ -12,6 +12,16 @@ Security:
   - Token-authenticated: every command must include the BRIDGE_TOKEN matching
     the daemon's loaded token. Mismatch -> rejected.
 
+Crash resilience (Tier 1 + Tier 2 — see docs/architecture.md):
+  - Append-only `journal.log` records received/started/completed/crashed events.
+  - `inflight/<id>.running` marker is written before each subprocess and
+    deleted after completion. On startup, any marker found means the daemon
+    died mid-execution — that command is failed with exit_code=-4 and never
+    retried (avoids double-execution of non-idempotent ops like git push).
+  - Optional `idempotency_key` on incoming commands: if the journal has a
+    cached result for that key, the script is NOT re-run; the cached result
+    is returned directly. Lets callers safely retry on TimeoutError.
+
 Configuration (env vars or .env in BRIDGE_ROOT):
   BRIDGE_ROOT       Directory containing queue/, results/, processed/.
                     Default: ~/.cowork-to-code-bridge
@@ -37,6 +47,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 BRIDGE_ROOT = Path(os.environ.get("BRIDGE_ROOT", Path.home() / ".cowork-to-code-bridge")).expanduser()
@@ -44,9 +55,12 @@ SCRIPTS_DIR = Path(os.environ.get("BRIDGE_SCRIPTS", BRIDGE_ROOT / "scripts")).ex
 QUEUE = BRIDGE_ROOT / "queue"
 RESULTS = BRIDGE_ROOT / "results"
 PROCESSED = BRIDGE_ROOT / "processed"
+INFLIGHT = BRIDGE_ROOT / "inflight"
+JOURNAL = BRIDGE_ROOT / "journal.log"
 POLL_SEC = float(os.environ.get("BRIDGE_POLL_SEC", "1.0"))
 MAX_TIMEOUT_SEC = int(os.environ.get("BRIDGE_MAX_TIMEOUT", "600"))
 ALLOW_UNAUTH = os.environ.get("BRIDGE_ALLOW_UNAUTH") == "1"
+JOURNAL_WARN_BYTES = 10 * 1024 * 1024  # warn at 10 MB
 
 # Allow only relative paths inside scripts/, ending in .sh or .py.
 SAFE_NAME = re.compile(r"^scripts/[A-Za-z0-9_/.-]+\.(sh|py)$")
@@ -80,7 +94,154 @@ def write_result(cmd_id: str, payload: dict) -> None:
     tmp.rename(out)
 
 
-def run_one(cmd_path: Path, token_required: str | None) -> None:
+# ─── Crash-resilience: journal + in-flight markers ────────────────────────────
+#
+# State model:
+#   journal.log            — append-only jsonl, one event per line, fsync'd.
+#                            Events: received, started, completed, crashed_inflight,
+#                            idempotency_hit.
+#   inflight/<id>.running  — written before subprocess.run, deleted after success.
+#                            Presence on startup => the command was mid-execution
+#                            when the daemon died.
+#
+# Recovery on startup:
+#   1. Replay journal => {id -> terminal_status} and {idempotency_key -> result}.
+#   2. For each inflight/*.running file:
+#        - If journal has terminal status for this id, just delete the marker
+#          (we crashed after completing but before cleanup).
+#        - Else: write exit_code=-4 result, journal crashed_inflight, move the
+#          queue file (if still present) to processed. Never re-run.
+#   3. For each queue/*.json with terminal status in journal, move to processed
+#      (stale leftover from a partial cleanup).
+
+
+def _journal_append(event: dict) -> None:
+    """Append one event to the journal as jsonl. fsync to survive power loss."""
+    event = {"ts": time.time(), **event}
+    line = json.dumps(event) + "\n"
+    # Open in append+binary, write, fsync.
+    fd = os.open(str(JOURNAL), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _journal_replay() -> tuple[dict[str, str], dict[str, dict]]:
+    """Read journal.log. Returns (terminal_status_by_id, cached_result_by_idem_key).
+
+    terminal_status_by_id: id -> one of {"completed", "crashed_inflight",
+                                          "idempotency_hit"} (terminal events only).
+    cached_result_by_idem_key: idempotency_key -> the result dict from the
+                               first completion that used that key.
+    """
+    terminal: dict[str, str] = {}
+    cache: dict[str, dict] = {}
+    # idem_key per id, harvested from received events, so we can attach the
+    # cached result when we later see the corresponding completed event.
+    idem_by_id: dict[str, str] = {}
+    if not JOURNAL.exists():
+        return terminal, cache
+    try:
+        with JOURNAL.open("r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    # Tolerate a partial last line from a power-loss crash.
+                    continue
+                evid = ev.get("id")
+                evtype = ev.get("event")
+                if not evid or not evtype:
+                    continue
+                if evtype == "received":
+                    k = ev.get("idempotency_key")
+                    if k:
+                        idem_by_id[evid] = k
+                elif evtype == "completed":
+                    terminal[evid] = "completed"
+                    result = ev.get("result") or {}
+                    k = idem_by_id.get(evid)
+                    if k and k not in cache:
+                        cache[k] = result
+                elif evtype == "crashed_inflight":
+                    terminal[evid] = "crashed_inflight"
+                elif evtype == "idempotency_hit":
+                    terminal[evid] = "idempotency_hit"
+    except Exception as e:
+        log(f"!! journal replay error: {e}")
+    return terminal, cache
+
+
+def _inflight_write(cmd_id: str, cmd_snapshot: dict) -> None:
+    """Write the in-flight marker. fsync so it survives a power cut."""
+    marker = INFLIGHT / f"{cmd_id}.running"
+    payload = {
+        "id": cmd_id,
+        "pid": os.getpid(),
+        "started_ts": time.time(),
+        "cmd": cmd_snapshot,
+    }
+    tmp = marker.with_suffix(".running.tmp")
+    data = json.dumps(payload).encode("utf-8")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    tmp.rename(marker)
+
+
+def _inflight_clear(cmd_id: str) -> None:
+    marker = INFLIGHT / f"{cmd_id}.running"
+    marker.unlink(missing_ok=True)
+
+
+def _recover_inflight(terminal: dict[str, str]) -> None:
+    """On startup: convert orphaned in-flight markers into recorded crashes."""
+    markers = sorted(INFLIGHT.glob("*.running"))
+    if not markers:
+        return
+    log(f"   recovery: {len(markers)} in-flight marker(s) from previous run")
+    for marker in markers:
+        cmd_id = marker.stem  # strips ".running"
+        if terminal.get(cmd_id) == "completed":
+            # We finished but crashed before cleanup. Result file should already
+            # exist; just clear the marker and move the queue file if it's still there.
+            log(f"   recovery: {cmd_id} already completed, clearing stale marker")
+            marker.unlink(missing_ok=True)
+            qfile = QUEUE / f"{cmd_id}.json"
+            if qfile.exists():
+                qfile.rename(PROCESSED / qfile.name)
+            continue
+        # Genuine crash: command was mid-execution. Fail it; do NOT re-run.
+        log(f"   recovery: {cmd_id} crashed mid-execution; marking failed")
+        write_result(cmd_id, {
+            "exit_code": -4,
+            "error": "daemon crashed mid-execution; command status indeterminate, not retried",
+        })
+        _journal_append({"id": cmd_id, "event": "crashed_inflight"})
+        marker.unlink(missing_ok=True)
+        qfile = QUEUE / f"{cmd_id}.json"
+        if qfile.exists():
+            qfile.rename(PROCESSED / qfile.name)
+
+
+def _drain_stale_queue(terminal: dict[str, str]) -> None:
+    """Queue files for ids that already reached terminal status are leftovers."""
+    for f in sorted(QUEUE.glob("*.json")):
+        if terminal.get(f.stem):
+            log(f"   recovery: {f.stem} already terminal in journal, archiving")
+            f.rename(PROCESSED / f.name)
+
+
+def run_one(cmd_path: Path, token_required: str | None,
+            terminal: dict[str, str], idem_cache: dict[str, dict]) -> None:
     cmd_id = cmd_path.stem
     try:
         cmd = json.loads(cmd_path.read_text())
@@ -93,6 +254,26 @@ def run_one(cmd_path: Path, token_required: str | None) -> None:
     if token_required and cmd.get("token") != token_required:
         write_result(cmd_id, {"exit_code": -1, "error": "bridge token mismatch"})
         log(f"  ✗ {cmd_id}: token mismatch")
+        cmd_path.rename(PROCESSED / cmd_path.name)
+        return
+
+    # ─── journal: received ────────────────────────────────────────────────────
+    idem_key = cmd.get("idempotency_key")
+    _journal_append({
+        "id": cmd_id,
+        "event": "received",
+        "idempotency_key": idem_key,
+        "script": cmd.get("script"),
+    })
+
+    # ─── idempotency short-circuit ────────────────────────────────────────────
+    if idem_key and idem_key in idem_cache:
+        cached = dict(idem_cache[idem_key])
+        cached.setdefault("idempotent_replay", True)
+        write_result(cmd_id, cached)
+        _journal_append({"id": cmd_id, "event": "idempotency_hit", "key": idem_key})
+        terminal[cmd_id] = "idempotency_hit"
+        log(f"  ↺ {cmd_id}: idempotency hit on key={idem_key!r}; returning cached result")
         cmd_path.rename(PROCESSED / cmd_path.name)
         return
 
@@ -144,6 +325,17 @@ def run_one(cmd_path: Path, token_required: str | None) -> None:
     env = load_env()
     env.update({str(k): str(v) for k, v in extra_env.items()})
 
+    # ─── in-flight marker + journal: started ──────────────────────────────────
+    # Marker is written BEFORE subprocess.run. If we crash between this point
+    # and the post-run cleanup, recovery on next startup will see the marker,
+    # write exit_code=-4, and refuse to re-run. This is the crash-safety
+    # guarantee for Tier 1.
+    _inflight_write(cmd_id, {
+        "script": script, "args": args, "timeout": timeout,
+        "idempotency_key": idem_key,
+    })
+    _journal_append({"id": cmd_id, "event": "started", "pid": os.getpid()})
+
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=timeout,
@@ -170,13 +362,21 @@ def run_one(cmd_path: Path, token_required: str | None) -> None:
     except Exception as e:
         result = {"exit_code": -3, "error": str(e)}
 
+    # Order matters: result file first (durable), then journal completed (so
+    # recovery sees terminal status), then clear in-flight marker, then move
+    # queue file. Each step is recoverable from the next startup.
     write_result(cmd_id, result)
+    _journal_append({"id": cmd_id, "event": "completed", "result": result})
+    terminal[cmd_id] = "completed"
+    if idem_key:
+        idem_cache.setdefault(idem_key, result)
+    _inflight_clear(cmd_id)
     cmd_path.rename(PROCESSED / cmd_path.name)
     log(f"  ✓ {cmd_id}: exit={result['exit_code']}")
 
 
 def main() -> int:
-    for d in (BRIDGE_ROOT, QUEUE, RESULTS, PROCESSED, SCRIPTS_DIR):
+    for d in (BRIDGE_ROOT, QUEUE, RESULTS, PROCESSED, INFLIGHT, SCRIPTS_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
     env = load_env()
@@ -193,6 +393,23 @@ def main() -> int:
 
     log(f"   BRIDGE_ROOT  = {BRIDGE_ROOT}")
     log(f"   SCRIPTS_DIR  = {SCRIPTS_DIR}")
+
+    # ─── crash recovery ───────────────────────────────────────────────────────
+    terminal, idem_cache = _journal_replay()
+    if terminal or idem_cache:
+        log(f"   journal: {len(terminal)} terminal record(s), "
+            f"{len(idem_cache)} idempotency key(s) cached")
+    _recover_inflight(terminal)
+    _drain_stale_queue(terminal)
+
+    # Soft warning if the journal is getting big — until we add rotation.
+    try:
+        if JOURNAL.exists() and JOURNAL.stat().st_size > JOURNAL_WARN_BYTES:
+            log(f"!! journal.log is {JOURNAL.stat().st_size // 1024} KB — "
+                f"consider archiving it (rotation lands in a future version).")
+    except OSError:
+        pass
+
     log(f"daemon up — polling {QUEUE} every {POLL_SEC}s. ctrl+c to stop.")
 
     stop = False
@@ -209,7 +426,7 @@ def main() -> int:
         try:
             files = sorted(QUEUE.glob("*.json"))
             for f in files:
-                run_one(f, token)
+                run_one(f, token, terminal, idem_cache)
         except Exception as e:
             log(f"! daemon loop error: {e}")
         time.sleep(POLL_SEC)

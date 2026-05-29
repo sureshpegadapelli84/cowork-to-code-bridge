@@ -74,6 +74,7 @@ def call_remote(
     cwd: str | None = None,
     env: dict[str, str] | None = None,
     bridge_root: Path | str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Submit a script invocation to the Mac daemon and wait for its result.
 
@@ -86,10 +87,20 @@ def call_remote(
         cwd: Working directory for the script on the Mac side.
         env: Extra env vars merged into the script's environment.
         bridge_root: Override the auto-detected bridge directory.
+        idempotency_key: Optional. If two calls share the same key, the
+            daemon executes the script only ONCE and returns the cached
+            result on subsequent calls (the result is annotated with
+            "idempotent_replay": True). Use this for non-idempotent
+            operations (git push, deploy, money-moving) so a retry after
+            TimeoutError is safe. Keys are persistent on the Mac via the
+            daemon's journal — they survive daemon crashes and reboots.
 
     Returns:
         Dict with keys: id, exit_code, stdout, stderr, ts_completed.
         On daemon-side error: also has "error" key with diagnostic text.
+        Exit code -4 means the daemon crashed mid-execution before this
+        command finished; the actual script may or may not have run, so
+        treat it as indeterminate.
 
     Raises:
         TimeoutError: If the daemon doesn't respond within `timeout + 5`s.
@@ -112,6 +123,8 @@ def call_remote(
         payload["cwd"] = cwd
     if env:
         payload["env"] = env
+    if idempotency_key:
+        payload["idempotency_key"] = idempotency_key
 
     token = _load_token(root)
     if token:
