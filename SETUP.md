@@ -6,8 +6,12 @@
 > Follow it top to bottom. As you go, you produce the human-facing words and
 > commands. The user should never have to read this file themselves.
 >
-> **Hard rule: do NOT use `/plugin` anywhere.** It does not work in Cowork. The
-> entire setup is: (1) a Python client you `pip install` here in the sandbox,
+> **Hard rules:**
+> - **Do NOT use `/plugin` anywhere.** It does not work in Cowork.
+> - **Do NOT `pip install`.** The Cowork sandbox blocks outbound network; pip
+>   will fail. The client is a single stdlib-only file you fetch ONCE.
+>
+> The entire setup is: (1) fetch one file (`bridge_client.py`) into the sandbox,
 > and (2) a one-line installer the user runs once in their Mac terminal. Nothing
 > else.
 
@@ -80,9 +84,9 @@ It has two halves:
   a `curl … | bash` installer. Survives reboots (launchd). You cannot start it
   from the sandbox; only the user can, by running one command on their Mac. It
   ships a `run_claude.sh` script that invokes Claude Code locally.
-- **Sandbox client** — the `cowork_to_code_bridge` Python package, importable
-  *here*. You install it with `pip`. It talks to the daemon through a shared
-  folder, authenticated by a token.
+- **Sandbox client** — `bridge_client.py`, a single stdlib-only file you fetch
+  into the sandbox (no pip, no package — the sandbox has no outbound network).
+  It talks to the daemon through a shared folder, authenticated by a token.
 
 Your job: get the client importable here, confirm the daemon is alive, and if it
 isn't, walk the user through the single Mac command with maximum hand-holding.
@@ -91,30 +95,38 @@ args=[task, workdir], idempotency_key=...)`.
 
 ---
 
-## Step 1 — install the sandbox client (silent, ~5s)
+## Step 1 — get the single-file client into the sandbox (one fetch)
 
-First check if it's already importable:
+**Do NOT `pip install`.** The Cowork sandbox blocks outbound network, so pip
+cannot reach GitHub — it will fail. Instead, fetch ONE self-contained file:
+`bridge_client.py` (pure stdlib, no dependencies, no package). Fetching one file
+means the user sees **one** network-permission popup, not several.
+
+First check if it's already present:
 
 ```python
-try:
-    from cowork_to_code_bridge import daemon_alive  # noqa
-    print("client present")
-except ImportError:
-    print("client missing")
+import os
+print("client present" if os.path.exists("bridge_client.py") else "client missing")
 ```
 
-If missing, install it (idempotent):
+If missing, fetch exactly this one URL (the user may get a single
+"allow fetch from raw.githubusercontent.com?" popup — that's expected; have them
+click Allow):
 
-```bash
-pip install --quiet "git+https://github.com/abhinaykrupa/cowork-to-code-bridge.git@main"
+```
+https://raw.githubusercontent.com/abhinaykrupa/cowork-to-code-bridge/main/bridge_client.py
 ```
 
-Don't narrate this to the user beyond a short "Setting up the connection…".
+Save its contents to `bridge_client.py` in the current sandbox directory. Use
+whatever fetch tool you have, then write the file. Tell the user up front:
+"You'll see one popup asking to allow a download from GitHub — click Allow; it's
+just one small file." **Fetch only this single file — do not fetch the package
+modules individually (that causes a popup per file).**
 
 ## Step 2 — probe for a live daemon
 
 ```python
-from cowork_to_code_bridge import daemon_alive
+from bridge_client import daemon_alive
 print("LIVE" if daemon_alive(ping_timeout=8) else "NOT_REACHABLE")
 ```
 
@@ -160,13 +172,13 @@ Then wait for the user.
 
 ## Step 4 — after the user says done, verify (don't trust their word)
 
-Re-install the client if needed (Step 1) and re-probe (Step 2). If the installer
-printed a `BRIDGE_ROOT=…` path, set it first:
+Re-fetch the client file if needed (Step 1) and re-probe (Step 2). If the
+installer printed a `BRIDGE_ROOT=…` path, set it first:
 
 ```python
 import os
 os.environ["BRIDGE_ROOT"] = "/Users/<them>/.cowork-to-code-bridge"  # use the path from their paste, else default
-from cowork_to_code_bridge import daemon_alive
+from bridge_client import daemon_alive
 print("LIVE" if daemon_alive(ping_timeout=12) else "STILL_DOWN")
 ```
 
@@ -208,8 +220,8 @@ actions, call the specific script directly (`scripts/git_status.sh`, etc.).
 ## Future sessions
 
 In any later Cowork session, the user can just say "connect to my Mac" or ask
-for a Mac action directly. Redo Step 1 (the client install is per-sandbox and
-cheap) and Step 2. The daemon is almost always already alive, so you jump
+for a Mac action directly. Redo Step 1 (fetch the one file again — it's
+per-sandbox; one popup) and Step 2. The daemon is almost always already alive, so you jump
 straight to Step 5. No re-onboarding, no terminal, no `/plugin`.
 
 ## What NOT to do

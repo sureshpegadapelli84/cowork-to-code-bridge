@@ -1,0 +1,149 @@
+"""
+bridge_client.py — SINGLE-FILE Cowork-side client for the cowork-to-code bridge.
+
+This is a self-contained, zero-dependency (stdlib-only) copy of the bridge
+client, meant to be dropped into a Cowork sandbox with ONE file fetch — no
+`pip install`, no package, no outbound network beyond fetching this one file.
+(The Cowork sandbox blocks outbound egress and prompts per fetch, so one file =
+one prompt.)
+
+It is kept in sync with `cowork_to_code_bridge/client.py`. If you have the full
+package installed, prefer `from cowork_to_code_bridge import call_remote`.
+
+Usage in a Cowork session:
+
+    import os
+    os.environ["BRIDGE_ROOT"] = "/Users/you/.cowork-to-code-bridge"  # from your Mac's .env
+    from bridge_client import call_remote, daemon_alive
+    print(daemon_alive())
+    r = call_remote("scripts/run_claude.sh",
+                    args=["Run the tests and fix failures", "/path/to/repo"],
+                    timeout=600, idempotency_key="task-1")
+    print(r["exit_code"], r["stdout"])
+
+Or run it directly as a probe:
+
+    BRIDGE_ROOT=/Users/you/.cowork-to-code-bridge python bridge_client.py
+    # prints "BRIDGE LIVE" or "DAEMON NOT REACHABLE"
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+__version__ = "0.3.0"
+
+
+def _resolve_bridge_root() -> Path:
+    """Find the bridge directory. Order: $BRIDGE_ROOT, $PWD/bridge, ./bridge."""
+    env = os.environ.get("BRIDGE_ROOT")
+    if env:
+        return Path(env)
+    cwd_bridge = Path.cwd() / "bridge"
+    if cwd_bridge.exists():
+        return cwd_bridge
+    return Path.cwd() / "bridge"
+
+
+def _load_token(bridge_root: Path) -> str | None:
+    """Load BRIDGE_TOKEN: env var wins, else .env in bridge_root, else None."""
+    env_tok = os.environ.get("BRIDGE_TOKEN")
+    if env_tok:
+        return env_tok
+    env_file = bridge_root / ".env"
+    if not env_file.exists():
+        return None
+    for line in env_file.read_text().splitlines():
+        if line.strip().startswith("BRIDGE_TOKEN"):
+            _, _, v = line.partition("=")
+            return v.strip().strip('"').strip("'") or None
+    return None
+
+
+def call_remote(
+    script: str,
+    args: list[str | int | float] | None = None,
+    timeout: int = 60,
+    poll_interval: float = 1.0,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+    bridge_root: Path | str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Submit a script invocation to the Mac daemon and wait for its result.
+
+    See the full package docs for details. Key points:
+      - `script` must be whitelisted on the Mac (e.g. "scripts/run_claude.sh").
+      - `idempotency_key` makes retries safe: same key => the daemon runs the
+        script once and returns the cached result (annotated idempotent_replay).
+      - exit_code -4 = daemon crashed mid-run; treat as indeterminate.
+    Raises TimeoutError if the daemon doesn't respond within timeout + 5s.
+    """
+    root = Path(bridge_root) if bridge_root else _resolve_bridge_root()
+    queue = root / "queue"
+    results = root / "results"
+    queue.mkdir(parents=True, exist_ok=True)
+    results.mkdir(parents=True, exist_ok=True)
+
+    cmd_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    payload: dict[str, Any] = {
+        "id": cmd_id,
+        "script": script,
+        "args": args or [],
+        "timeout": timeout,
+        "ts_submitted": time.time(),
+    }
+    if cwd:
+        payload["cwd"] = cwd
+    if env:
+        payload["env"] = env
+    if idempotency_key:
+        payload["idempotency_key"] = idempotency_key
+
+    token = _load_token(root)
+    if token:
+        payload["token"] = token
+
+    cmd_file = queue / f"{cmd_id}.json"
+    tmp = cmd_file.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload))
+    tmp.rename(cmd_file)
+
+    result_file = results / f"{cmd_id}.json"
+    deadline = time.time() + timeout + 5
+    while time.time() < deadline:
+        if result_file.exists():
+            try:
+                return json.loads(result_file.read_text())
+            except json.JSONDecodeError:
+                time.sleep(poll_interval)
+                continue
+        time.sleep(poll_interval)
+
+    raise TimeoutError(
+        f"bridge: no result for {cmd_id} within {timeout + 5}s. "
+        f"Is the daemon running on the Mac? Check "
+        f"`launchctl list | grep cowork-to-code-bridge` on the Mac, and confirm "
+        f"BRIDGE_ROOT matches the path in your Mac's ~/.cowork-to-code-bridge/.env."
+    )
+
+
+def daemon_alive(bridge_root: Path | str | None = None, ping_timeout: int = 10) -> bool:
+    """Quick health check — submits the ping script and waits for exit_code==0."""
+    try:
+        r = call_remote("scripts/ping.sh", args=[], timeout=ping_timeout,
+                        bridge_root=bridge_root)
+        return r.get("exit_code") == 0
+    except TimeoutError:
+        return False
+
+
+if __name__ == "__main__":
+    # Run directly as a probe: prints LIVE / NOT REACHABLE.
+    alive = daemon_alive(ping_timeout=10)
+    print("BRIDGE LIVE" if alive else "DAEMON NOT REACHABLE")
+    raise SystemExit(0 if alive else 1)

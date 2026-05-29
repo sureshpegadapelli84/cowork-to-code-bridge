@@ -11,6 +11,11 @@ capability: hand a free-form task to a local Claude Code agent via
 simple fixed actions. Use this any time the user asks for something that needs
 their local machine.
 
+> **Import note:** in a Cowork sandbox the client is the single fetched file, so
+> use `from bridge_client import call_remote`. The `from cowork_to_code_bridge
+> import call_remote` form below works only where the full package is installed
+> (e.g. the terminal CLI). Same API either way.
+
 ## Hand a task to Claude Code (the main path)
 
 ```python

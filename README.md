@@ -85,16 +85,18 @@ The Cowork paste-line just tells Claude to follow [`SETUP.md`](./SETUP.md). You 
    ```bash
    curl -fsSL https://raw.githubusercontent.com/abhinaykrupa/cowork-to-code-bridge/main/install.sh | bash
    ```
-2. **In the Cowork sandbox**, install the client and probe:
+2. **In the Cowork sandbox**, fetch the single-file client (the sandbox blocks outbound network, so **don't** `pip install` — just grab one file):
    ```bash
-   pip install --quiet "git+https://github.com/abhinaykrupa/cowork-to-code-bridge.git@main" && python -c "from cowork_to_code_bridge import daemon_alive; print('BRIDGE LIVE' if daemon_alive(ping_timeout=10) else 'DAEMON NOT REACHABLE')"
+   # fetch this ONE url and save it as bridge_client.py (one network-permission popup):
+   # https://raw.githubusercontent.com/abhinaykrupa/cowork-to-code-bridge/main/bridge_client.py
+   BRIDGE_ROOT="/Users/you/.cowork-to-code-bridge" python bridge_client.py   # prints BRIDGE LIVE / DAEMON NOT REACHABLE
    ```
    - `BRIDGE LIVE` → done.
-   - `DAEMON NOT REACHABLE` → the client can't find the bridge folder. Set `BRIDGE_ROOT` to the path printed in your Mac's `~/.cowork-to-code-bridge/.env`, then re-probe:
+   - `DAEMON NOT REACHABLE` → set `BRIDGE_ROOT` to the path printed in your Mac's `~/.cowork-to-code-bridge/.env` (as above), then re-run. Or in Python:
      ```python
      import os
      os.environ["BRIDGE_ROOT"] = "/Users/you/.cowork-to-code-bridge"  # from your Mac's .env
-     from cowork_to_code_bridge import daemon_alive
+     from bridge_client import daemon_alive
      print(daemon_alive(ping_timeout=10))
      ```
 </details>
