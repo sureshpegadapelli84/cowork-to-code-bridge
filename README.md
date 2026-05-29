@@ -2,6 +2,8 @@
 
 **Connect Claude Cowork to Claude Code on your Mac.**
 
+> 🍎 **macOS only.** This works on Mac computers only — it relies on macOS's built-in service manager (`launchd`) and Mac system tools. It does **not** work on Windows or Linux. (Linux/Windows support is on the roadmap, not available today.)
+
 [Claude Cowork](https://claude.ai/cowork) is great at planning and editing, but it runs in a sealed cloud sandbox — it can't reach your actual machine. **Claude Code**, running on your Mac, *can*: it has your shell, your repos, your tools, and full agent abilities.
 
 This bridge connects the two. Cowork hands a task to **Claude Code on your Mac**, a real local agent does the work, and the result comes back to your Cowork chat. So you can say things in Cowork like:

@@ -36,6 +36,17 @@ c_yellow() { printf "\033[0;33m%s\033[0m\n" "$1"; }
 c_red()    { printf "\033[0;31m%s\033[0m\n" "$1"; }
 step()     { printf "\n\033[1;36m==> %s\033[0m\n" "$1"; }
 
+# ─── 0. Preflight: macOS only ────────────────────────────────────────────────
+# This installer uses launchd, ~/Library/LaunchAgents, and Mac system tools.
+# Fail fast with a clear message on anything that isn't macOS.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  c_red "✗ cowork-to-code-bridge is macOS only."
+  echo "  This installer requires macOS (it uses launchd and Mac system tools)."
+  echo "  It does not support Windows or Linux. Detected: $(uname -s)."
+  echo "  Linux/Windows support is on the roadmap but not available yet."
+  exit 1
+fi
+
 # ─── 1. Preflight: locate a Python 3.10+ interpreter ─────────────────────────
 step "Locating Python 3.10+ interpreter"
 

@@ -58,6 +58,11 @@ You're in an isolated sandbox that cannot see the user's Mac. The bridge is the
 only way to reach it, and the user will need to run **one** command on their Mac
 once. Continue to Step 1 below.
 
+**macOS only:** the local machine must be a Mac — the installer uses launchd and
+Mac system tools, and does not support Windows or Linux. If the user says their
+computer is Windows or Linux, tell them this bridge won't work for them (yet) and
+stop; don't send them the install command.
+
 ---
 
 ## What you're setting up (so you understand the goal)
