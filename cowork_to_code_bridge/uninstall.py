@@ -25,6 +25,7 @@ from pathlib import Path
 PLIST_LABEL = "dev.cowork-to-code-bridge.daemon"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
 DEFAULT_BRIDGE_ROOT = Path.home() / ".cowork-to-code-bridge"
+SKILL_DIR = Path.home() / ".claude" / "skills" / "cowork-to-code-bridge"
 PACKAGE_NAME = "cowork-to-code-bridge"
 
 
@@ -114,6 +115,14 @@ def remove_bridge_root(bridge_root: Path, assume_yes: bool) -> bool:
     return True
 
 
+def remove_skill() -> bool:
+    """Remove the global Cowork skill so it stops auto-loading into sessions."""
+    if SKILL_DIR.exists():
+        shutil.rmtree(SKILL_DIR)
+        return True
+    return False
+
+
 def pip_uninstall(assume_yes: bool) -> bool:
     """Uninstall the package using the SAME interpreter this script is running under.
 
@@ -184,6 +193,13 @@ def main() -> int:
         else:
             print(f"  ({bridge_root} not removed)")
 
+    # ─── 2.5 Remove the global Cowork skill ───────────────────────────────────
+    step(f"Removing global Cowork skill at {SKILL_DIR}")
+    if remove_skill():
+        print(green(f"  ✓ removed {SKILL_DIR} (it will stop loading in Cowork sessions)"))
+    else:
+        print(f"  (no skill at {SKILL_DIR})")
+
     # ─── 3. Uninstall Python package ──────────────────────────────────────────
     if args.keep_package:
         step("Skipping Python package uninstall (--keep-package)")
@@ -200,8 +216,9 @@ def main() -> int:
 
     print(green("\nDone."))
     print(
-        "To verify: `launchctl list | grep cowork-to-code-bridge` (should be empty), "
-        "`ls ~/.cowork-to-code-bridge` (should not exist if data removed)."
+        "To verify: `launchctl list | grep cowork-to-code-bridge` (empty), "
+        "`ls ~/.cowork-to-code-bridge` (gone if data removed), and "
+        "`ls ~/.claude/skills/cowork-to-code-bridge` (gone — no longer loads in Cowork)."
     )
     return 0
 

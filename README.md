@@ -184,7 +184,9 @@ One command, undoes everything the installer did:
 cowork-to-code-bridge-uninstall
 ```
 
-It will ask you to confirm before each step (stopping the daemon, deleting the bridge folder, removing the Python package). Say yes to all to fully reset.
+It undoes everything the installer set up: stops and removes the background daemon, removes the global Cowork skill (so it stops loading into your Cowork sessions), deletes the bridge folder (token, scripts, history), and uninstalls the Python package. It asks before each destructive step — say yes to all to fully reset.
+
+> **No network needed, no Cowork step.** Uninstall is entirely on your Mac. Once the skill is removed, your Cowork chats simply won't have the bridge anymore — nothing to clean up there.
 
 For a no-questions-asked uninstall:
 

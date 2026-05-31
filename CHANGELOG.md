@@ -13,6 +13,11 @@ The big simplification: **install as a global skill, one Mac command, nothing in
   install time instead of embedding a hand-maintained copy, so the installed
   skill can't ship a stale client (the embedded copy had drifted and lacked
   streaming). Falls back to the installed package's client if offline.
+- **Uninstall now removes the global skill.** The Python uninstaller
+  (`cowork-to-code-bridge-uninstall`) previously left
+  `~/.claude/skills/cowork-to-code-bridge/` behind, so the skill kept loading
+  into Cowork sessions after a "complete" uninstall. Both the Python and shell
+  uninstallers now remove it.
 
 ### Changed
 - **Architecture pivot to a global Claude skill.** The Cowork client now installs
