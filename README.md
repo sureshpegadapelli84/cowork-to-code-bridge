@@ -31,6 +31,45 @@ Because Claude Code can run things on your Mac, a useful **side benefit** is tha
 
 ---
 
+## Install — two pastes total
+
+**Step 1 — on your machine (once).** Open Terminal (`Cmd + Space` → **Terminal**), paste this, press Enter:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abhinaykrupa/cowork-to-code-bridge/main/install.sh | bash
+```
+
+Wait ~30 seconds. It installs a small background helper (auto-restarts, reboot-safe) and a Claude skill. When it finishes it prints a **connect line with your real path filled in** — copy that exact line, or use the template below.
+
+**Step 2 — in Cowork (once per chat).** Paste the connect line into any Claude Cowork chat (replace the path with the one the installer printed):
+
+```text
+Connect to my machine via the cowork-to-code bridge at ~/.cowork-to-code-bridge — mount that folder, read its CLAUDE.md, and confirm the bridge is live.
+```
+
+Claude asks for permission to see that folder (**approve it**), reads the instructions inside, and confirms **`BRIDGE LIVE`**. Now, in that chat, just talk:
+
+> *"build me a small web app on my machine"* · *"run my tests and fix what fails"* · *"check my machine's health"* · *"git push my project"*
+
+Claude hands the work to Claude Code on your machine and brings the result back.
+
+> **Why the second paste?** Cowork's sandbox can't see your machine until you grant it access to the bridge folder — that's a one-time permission per chat, and the connect line is what triggers it. No downloads, no `/plugin`, no popups beyond that single folder-access approval. (Once a chat is connected it stays connected; a brand-new chat needs the line again.)
+
+> **Don't have Python 3.10+?** The installer handles it: if it finds only Apple's stock Python (3.8), it installs a modern one for you (via Homebrew, installing Homebrew first if needed). That part can take a few minutes and may ask for your Mac password — that's normal. Skip it with `BRIDGE_PYTHON_AUTOINSTALL=0`.
+
+<details>
+<summary>What the installer puts where (for the curious / developers)</summary>
+
+- **Daemon** → runs from `~/.cowork-to-code-bridge/`, managed by launchd (macOS) or systemd --user (Linux); auto-start, reboot-safe.
+- **Global skill** → `~/.claude/skills/cowork-to-code-bridge/` (SKILL.md + `bridge_client.py` + a `bridge_env.json` pointing at `BRIDGE_ROOT`).
+- **Whitelisted scripts** → `~/.cowork-to-code-bridge/scripts/` (`run_claude.sh`, `mac_health.sh`, …).
+- **`CLAUDE.md`** → written into `~/.cowork-to-code-bridge/` so the bridge self-documents once a Cowork session mounts the folder.
+
+The Cowork side imports the colocated `bridge_client.py` — pure stdlib, no pip, no network fetch.
+</details>
+
+---
+
 ## How it works
 
 Cowork can't reach your machine directly (it's sandboxed). So the bridge uses a folder both sides can see: Cowork **writes** a task into it, a small helper on your machine **runs** it (handing real work to Claude Code), and **writes the result back**. No open ports, no servers, no network calls between them.
@@ -79,7 +118,7 @@ Cowork can't reach your machine directly (it's sandboxed). So the bridge uses a 
 | **The Claude Desktop app on your Mac** | ✅ Yes — it runs right on your machine | **No.** Just ask Claude to run things. Nothing to install. |
 | **Cowork in your browser / the cloud** | ❌ No — it runs in a sealed cloud sandbox that can't see your Mac | **Yes** — this bridge is the only way to connect it. |
 
-Not sure which you are? Just paste the [one setup line below](#install-about-2-minutes) into your Claude chat — Claude checks for you and, if you don't need the bridge, it'll tell you so and skip the whole thing.
+Not sure which you are? Just follow the [two-paste install above](#install--two-pastes-total) — when you paste the connect line into Cowork, Claude checks for you, and if you don't need the bridge it'll tell you so and skip it.
 
 ---
 
@@ -98,42 +137,6 @@ Mostly — and the parts that need your attention are spelled out honestly below
 **Requirement for the Claude Code path:** `run_claude.sh` needs the Claude Code **CLI** (`claude`) installed on your Mac. **The Claude Desktop app alone is not enough** — it bundles its own copy but doesn't expose a `claude` command. If the CLI is missing, `run_claude.sh` tries to install it on the fly (`brew install claude-code`, or the official installer) and then proceeds; if that fails it returns the exact one-line install command. To turn off auto-install (and just get the install instructions instead), set `BRIDGE_CLAUDE_AUTOINSTALL=0`. The system-info scripts (`mac_health.sh`, etc.) don't need the CLI at all.
 
 You can [uninstall it completely with one command](#uninstall) at any time.
-
----
-
-## Install — two pastes total
-
-**Step 1 — on your machine (once).** Open Terminal (`Cmd + Space` → **Terminal**), paste this, press Enter:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/abhinaykrupa/cowork-to-code-bridge/main/install.sh | bash
-```
-
-Wait ~30 seconds. It installs a small background helper (auto-restarts, reboot-safe) and a Claude skill. When it finishes it prints a **connect line** — copy it.
-
-**Step 2 — in Cowork (once per chat).** Paste that connect line into any Claude Cowork chat. It looks like:
-
-> *Connect to my machine via the cowork-to-code bridge at `/Users/you/.cowork-to-code-bridge` — mount that folder, read its CLAUDE.md, and confirm the bridge is live.*
-
-Claude asks for permission to see that folder (**approve it**), reads the instructions inside, and confirms **`BRIDGE LIVE`**. Now, in that chat, just talk:
-
-> *"build me a small web app on my machine"* · *"run my tests and fix what fails"* · *"check my machine's health"* · *"git push my project"*
-
-Claude hands the work to Claude Code on your machine and brings the result back.
-
-> **Why the second paste?** Cowork's sandbox can't see your machine until you grant it access to the bridge folder — that's a one-time permission per chat, and the connect line is what triggers it. No downloads, no `/plugin`, no popups beyond that single folder-access approval. (Once a chat is connected it stays connected; a brand-new chat needs the line again.)
-
-> **Don't have Python 3.10+?** The installer handles it: if it finds only Apple's stock Python (3.8), it installs a modern one for you (via Homebrew, installing Homebrew first if needed). That part can take a few minutes and may ask for your Mac password — that's normal. Skip it with `BRIDGE_PYTHON_AUTOINSTALL=0`.
-
-<details>
-<summary>What the installer puts where (for the curious / developers)</summary>
-
-- **Daemon** → runs from `~/.cowork-to-code-bridge/`, managed by launchd (auto-start, reboot-safe).
-- **Global skill** → `~/.claude/skills/cowork-to-code-bridge/` (SKILL.md + `bridge_client.py` + a `bridge_env.json` pointing at `BRIDGE_ROOT`). This is what loads into every Cowork session.
-- **Whitelisted scripts** → `~/.cowork-to-code-bridge/scripts/` (`run_claude.sh`, `mac_health.sh`, …).
-
-The Cowork side imports the colocated `bridge_client.py` — pure stdlib, no pip, no network fetch. To verify by hand from a Cowork session: `from bridge_client import daemon_alive; print(daemon_alive())` (the skill sets `BRIDGE_ROOT` for you via `bridge_env.json`).
-</details>
 
 ---
 
