@@ -59,14 +59,29 @@ confirm() {
   [[ "$response" =~ ^[Yy]$ ]]
 }
 
-if launchctl list 2>/dev/null | grep -q "dev.cowork-to-code-bridge.daemon"; then
-  echo "→ unloading launchd agent"
-  launchctl unload "$PLIST" 2>/dev/null || true
-fi
-
-if [[ -f "$PLIST" ]]; then
-  echo "→ removing $PLIST"
-  rm -f "$PLIST"
+if [[ "$(uname -s)" == "Linux" ]]; then
+  # Linux: tear down the systemd --user service.
+  if command -v systemctl >/dev/null 2>&1; then
+    echo "→ stopping + disabling systemd --user service"
+    systemctl --user disable --now cowork-to-code-bridge.service 2>/dev/null || true
+  fi
+  UNIT="$HOME/.config/systemd/user/cowork-to-code-bridge.service"
+  if [[ -f "$UNIT" ]]; then
+    echo "→ removing $UNIT"
+    rm -f "$UNIT"
+    systemctl --user daemon-reload 2>/dev/null || true
+  fi
+else
+  # macOS: tear down the launchd agent.
+  if launchctl list 2>/dev/null | grep -q "dev.cowork-to-code-bridge.daemon"; then
+    echo "→ unloading launchd agent"
+    launchctl bootout "gui/$(id -u)/dev.cowork-to-code-bridge.daemon" 2>/dev/null \
+      || launchctl unload "$PLIST" 2>/dev/null || true
+  fi
+  if [[ -f "$PLIST" ]]; then
+    echo "→ removing $PLIST"
+    rm -f "$PLIST"
+  fi
 fi
 
 if [[ "$KEEP_DATA" -eq 1 ]]; then

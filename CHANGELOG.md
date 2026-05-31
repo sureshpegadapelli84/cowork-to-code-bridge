@@ -4,6 +4,25 @@ All notable changes to this project. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the `pyproject.toml`
 / `plugin.json` version.
 
+## [0.5.0]
+
+### Added
+- **Linux support.** The bridge now runs on Linux via a `systemd --user`
+  service (with `loginctl enable-linger` so it survives logout/reboot), in
+  addition to macOS launchd. One installer auto-detects the OS and branches the
+  service-manager steps; everything else (Python, bridge dir, token, global
+  skill, scripts) is shared. The daemon and client were already pure-Python and
+  portable. System-info scripts (`mac_health`, `mac_ram`, `mac_top`,
+  `mac_network`) are now cross-platform (Linux branches use `free`, `/proc`,
+  `ip`, `ps -eo`).
+- Uninstall (both shell and Python) tears down the systemd unit on Linux.
+- CI now runs the suite on `ubuntu-latest` as well as `macos-latest`.
+
+### Changed
+- Pitch broadened from "on your Mac" to "on your own computer (macOS or Linux)".
+- `run_claude.sh` CLI install hint leads with the cross-platform official
+  installer.
+
 ## [0.4.0]
 
 The big simplification: **install as a global skill, one Mac command, nothing in Cowork.**

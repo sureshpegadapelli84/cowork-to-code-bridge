@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -102,6 +103,26 @@ def remove_plist() -> bool:
     return False
 
 
+SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / "cowork-to-code-bridge.service"
+
+
+def stop_systemd() -> bool:
+    """Linux: stop + disable + remove the systemd --user unit. True if anything done."""
+    import shutil as _sh
+    if not _sh.which("systemctl"):
+        return False
+    did = False
+    subprocess.run(
+        ["systemctl", "--user", "disable", "--now", "cowork-to-code-bridge.service"],
+        capture_output=True, check=False,
+    )
+    if SYSTEMD_UNIT.exists():
+        SYSTEMD_UNIT.unlink()
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, check=False)
+        did = True
+    return did
+
+
 def remove_bridge_root(bridge_root: Path, assume_yes: bool) -> bool:
     if not bridge_root.exists():
         return False
@@ -171,17 +192,23 @@ def main() -> int:
     print(f"  package     : {PACKAGE_NAME}")
     print(f"  interpreter : {sys.executable}")
 
-    # ─── 1. Stop + remove launchd agent ───────────────────────────────────────
-    step("Stopping launchd agent")
-    if unload_launchd():
-        print(green("  ✓ daemon unloaded"))
+    # ─── 1. Stop + remove the background service (launchd or systemd) ──────────
+    if platform.system() == "Linux":
+        step("Stopping systemd --user service")
+        if stop_systemd():
+            print(green("  ✓ systemd service stopped + unit removed"))
+        else:
+            print("  (no systemd service found)")
     else:
-        print(f"  (no loaded daemon labelled {PLIST_LABEL})")
-
-    if remove_plist():
-        print(green(f"  ✓ removed {PLIST_PATH}"))
-    else:
-        print(f"  (no plist at {PLIST_PATH})")
+        step("Stopping launchd agent")
+        if unload_launchd():
+            print(green("  ✓ daemon unloaded"))
+        else:
+            print(f"  (no loaded daemon labelled {PLIST_LABEL})")
+        if remove_plist():
+            print(green(f"  ✓ removed {PLIST_PATH}"))
+        else:
+            print(f"  (no plist at {PLIST_PATH})")
 
     # ─── 2. Remove bridge data ────────────────────────────────────────────────
     if args.keep_data:

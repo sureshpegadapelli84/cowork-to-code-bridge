@@ -36,16 +36,34 @@ c_yellow() { printf "\033[0;33m%s\033[0m\n" "$1"; }
 c_red()    { printf "\033[0;31m%s\033[0m\n" "$1"; }
 step()     { printf "\n\033[1;36m==> %s\033[0m\n" "$1"; }
 
-# ─── 0. Preflight: macOS only ────────────────────────────────────────────────
-# This installer uses launchd, ~/Library/LaunchAgents, and Mac system tools.
-# Fail fast with a clear message on anything that isn't macOS.
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  c_red "✗ cowork-to-code-bridge is macOS only."
-  echo "  This installer requires macOS (it uses launchd and Mac system tools)."
-  echo "  It does not support Windows or Linux. Detected: $(uname -s)."
-  echo "  Linux/Windows support is on the roadmap but not available yet."
-  exit 1
-fi
+# ─── 0. Preflight: detect OS / service manager ───────────────────────────────
+# macOS uses launchd; Linux uses systemd --user. We branch the service-manager
+# steps on $OS; everything else (Python, bridge dir, token, scripts, the global
+# skill) is shared.
+OS="$(uname -s)"
+case "$OS" in
+  Darwin)
+    SERVICE_MGR="launchd"
+    ;;
+  Linux)
+    if command -v systemctl >/dev/null 2>&1; then
+      SERVICE_MGR="systemd"
+    else
+      c_red "✗ Linux without systemd is not yet supported."
+      echo "  This installer manages the daemon via 'systemctl --user', which"
+      echo "  wasn't found. (Containers/minimal distros may lack it.)"
+      echo "  Open an issue if you need a non-systemd Linux path."
+      exit 1
+    fi
+    ;;
+  *)
+    c_red "✗ Unsupported OS: $OS"
+    echo "  cowork-to-code-bridge supports macOS (launchd) and Linux (systemd)."
+    echo "  Windows is not supported."
+    exit 1
+    ;;
+esac
+c_green "  ✓ OS: $OS (service manager: $SERVICE_MGR)"
 
 # ─── 1. Preflight: locate a Python 3.10+ interpreter ─────────────────────────
 step "Locating Python 3.10+ interpreter"
@@ -351,10 +369,10 @@ if [[ -z "${CLAUDE_BIN:-}" && "$AUTOINSTALL" == "1" ]] && install_claude; then
 fi
 if [[ -z "${CLAUDE_BIN:-}" ]]; then
   cat >&2 <<MSG
-run_claude.sh: the Claude Code CLI is not installed on this Mac, and it could
-not be installed automatically. Install it once, then retry:
-  brew install claude-code
-  # or:  curl -fsSL https://claude.ai/install.sh | bash
+run_claude.sh: the Claude Code CLI is not installed on this machine, and it
+could not be installed automatically. Install it once, then retry:
+  curl -fsSL https://claude.ai/install.sh | bash   # macOS or Linux
+  # or, with Homebrew: brew install claude-code
 (Having the Claude Desktop app is NOT enough — the CLI is a separate install.)
 MSG
   exit 127
@@ -373,25 +391,31 @@ chmod +x "$BRIDGE_ROOT/scripts/run_claude.sh"
 # do on its own — the bridge makes it possible.
 cat > "$BRIDGE_ROOT/scripts/mac_health.sh" <<'MH'
 #!/usr/bin/env bash
-# mac_health.sh — full health snapshot of this Mac. Args: none.
+# mac_health.sh — full health snapshot of this machine (macOS or Linux). Args: none.
 set -u
-echo "=== HOST ==="; scutil --get ComputerName 2>/dev/null; hostname; sw_vers 2>/dev/null
+echo "=== HOST ==="; hostname
+if [ "$(uname -s)" = "Darwin" ]; then sw_vers 2>/dev/null; else (. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-$(uname -sr)}"); fi
 echo "=== UPTIME / LOAD ==="; uptime
-echo "=== CPU ==="; top -l 1 -n 0 2>/dev/null | grep -E "CPU usage" || echo "n/a"
-echo "=== MEMORY (pages) ==="; vm_stat 2>/dev/null | head -6
+echo "=== CPU ==="
+if [ "$(uname -s)" = "Darwin" ]; then top -l 1 -n 0 2>/dev/null | grep -E "CPU usage" || echo n/a
+else grep 'cpu ' /proc/stat >/dev/null 2>&1 && echo "load: $(cut -d' ' -f1-3 /proc/loadavg)" || echo n/a; fi
+echo "=== MEMORY ==="
+if [ "$(uname -s)" = "Darwin" ]; then vm_stat 2>/dev/null | head -6; else free -h 2>/dev/null || cat /proc/meminfo | head -3; fi
 echo "=== DISK ==="; df -h / 2>/dev/null
-echo "=== BATTERY ==="; pmset -g batt 2>/dev/null | head -2 || echo "n/a"
-echo "=== TOP 5 PROCS BY CPU ==="; ps -arcwwwxo pid,pcpu,pmem,comm 2>/dev/null | head -6
+echo "=== TOP 5 PROCS BY CPU ==="; ps -eo pid,pcpu,pmem,comm 2>/dev/null | sort -k2 -rn | head -6
 exit 0
 MH
 cat > "$BRIDGE_ROOT/scripts/mac_ram.sh" <<'MR'
 #!/usr/bin/env bash
-# mac_ram.sh — RAM usage summary. Args: none.
+# mac_ram.sh — RAM usage summary (macOS or Linux). Args: none.
 set -u
-TOTAL=$(sysctl -n hw.memsize 2>/dev/null)
-echo "Total RAM: $(( TOTAL / 1024 / 1024 / 1024 )) GB"
-echo "--- vm_stat ---"; vm_stat 2>/dev/null
-echo "--- memory pressure ---"; memory_pressure 2>/dev/null | tail -3 || echo "n/a"
+if [ "$(uname -s)" = "Darwin" ]; then
+  TOTAL=$(sysctl -n hw.memsize 2>/dev/null)
+  echo "Total RAM: $(( TOTAL / 1024 / 1024 / 1024 )) GB"
+  echo "--- vm_stat ---"; vm_stat 2>/dev/null
+else
+  free -h 2>/dev/null || cat /proc/meminfo 2>/dev/null | head -5
+fi
 exit 0
 MR
 cat > "$BRIDGE_ROOT/scripts/mac_disk.sh" <<'MD'
@@ -404,20 +428,28 @@ exit 0
 MD
 cat > "$BRIDGE_ROOT/scripts/mac_top.sh" <<'MT'
 #!/usr/bin/env bash
-# mac_top.sh — top processes. Args: optional count (default 15).
+# mac_top.sh — top processes by CPU and memory (macOS or Linux). Args: count (default 15).
 set -u
 N="${1:-15}"
-echo "=== by CPU ==="; ps -arcwwwxo pid,pcpu,pmem,comm 2>/dev/null | head -"$((N+1))"
-echo "=== by MEM ==="; ps -amcwwwxo pid,pcpu,pmem,comm 2>/dev/null | head -"$((N+1))"
+echo "=== by CPU ==="; ps -eo pid,pcpu,pmem,comm 2>/dev/null | sort -k2 -rn | head -"$((N+1))"
+echo "=== by MEM ==="; ps -eo pid,pcpu,pmem,comm 2>/dev/null | sort -k3 -rn | head -"$((N+1))"
 exit 0
 MT
 cat > "$BRIDGE_ROOT/scripts/mac_network.sh" <<'MN'
 #!/usr/bin/env bash
-# mac_network.sh — network status. Args: none.
+# mac_network.sh — network status (macOS or Linux). Args: none.
 set -u
-echo "=== interfaces (active) ==="; ifconfig 2>/dev/null | grep -E "^[a-z]|inet " | grep -v "127.0.0.1" | head -20
-echo "=== default route ==="; route -n get default 2>/dev/null | grep -E "gateway|interface"
-echo "=== connectivity ==="; ping -c 2 -t 3 1.1.1.1 2>/dev/null | tail -2 || echo "no connectivity"
+echo "=== interfaces (active) ==="
+ip -brief addr 2>/dev/null | grep -v '127.0.0.1' \
+  || ifconfig 2>/dev/null | grep -E "^[a-z]|inet " | grep -v "127.0.0.1" | head -20
+echo "=== default route ==="
+ip route show default 2>/dev/null || route -n get default 2>/dev/null | grep -E "gateway|interface"
+echo "=== connectivity ==="
+if ping -c 2 -W 3 1.1.1.1 >/dev/null 2>&1 || ping -c 2 -t 3 1.1.1.1 >/dev/null 2>&1; then
+  echo "online (1.1.1.1 reachable)"
+else
+  echo "no connectivity"
+fi
 exit 0
 MN
 chmod +x "$BRIDGE_ROOT"/scripts/mac_*.sh
@@ -460,7 +492,7 @@ printf '{ "BRIDGE_ROOT": "%s" }\n' "$BRIDGE_ROOT" > "$SKILLS_DIR/bridge_env.json
 cat > "$SKILLS_DIR/SKILL.md" <<SKILLMD
 ---
 name: cowork-to-code-bridge
-description: Connects Claude Cowork to Claude Code running on the user's Mac, so the whole machine is reachable from a Cowork chat. Use this skill whenever the user asks to do something that needs their actual Mac and can't be done in the Cowork sandbox — building or running an app, running tests, git push/pull, installing packages, npm/pip/brew/docker, checking the Mac's health/RAM/disk/processes, or any task they describe as "on my Mac". Also triggers on "build me an app", "run this on my Mac", "use Claude Code on my machine", "connect to my Mac", "check my Mac". The bridge hands the task to a real Claude Code agent on the Mac; it is idempotent and survives reboots.
+description: Connects Claude Cowork to Claude Code running on the user's own computer (macOS or Linux), so the whole machine is reachable from a Cowork chat. Use this skill whenever the user asks to do something that needs their actual machine and can't be done in the Cowork sandbox — building or running an app, running tests, git push/pull, installing packages, npm/pip/brew/docker, checking the machine's health/RAM/disk/processes, or any task they describe as "on my Mac" or "on my machine/server". Also triggers on "build me an app", "run this on my machine", "use Claude Code on my computer", "connect to my Mac", "check my machine". The bridge hands the task to a real Claude Code agent on the machine; it is idempotent and survives reboots.
 ---
 
 # cowork-to-code-bridge
@@ -484,7 +516,7 @@ print("BRIDGE LIVE" if daemon_alive(ping_timeout=10) else "DAEMON NOT REACHABLE"
 
 If DAEMON NOT REACHABLE, the Mac side isn't set up: tell the user to run, once,
 in their Mac Terminal — \`curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash\`
-— then retry. (macOS only.)
+— then retry. (macOS or Linux; Windows not supported.)
 
 ## Step 2 — hand a task to Claude Code (main use)
 
@@ -507,8 +539,8 @@ Be brief with the user; never claim success without exit_code 0 / BRIDGE LIVE.
 SKILLMD
 c_green "  ✓ global skill installed at $SKILLS_DIR (loads in every Cowork session)"
 
-# ─── 6. launchd plist ────────────────────────────────────────────────────────
-step "Installing launchd agent (auto-start on login)"
+# ─── 6. Install + start the daemon as a per-user service ─────────────────────
+step "Installing background service ($SERVICE_MGR, auto-start + reboot-safe)"
 
 # Resolve the daemon entry point to an ABSOLUTE path. Prefer the installed
 # console script under the per-user scripts dir (independent of PATH).
@@ -518,10 +550,8 @@ CONSOLE_SCRIPT="$USER_SCRIPTS_DIR/cowork-to-code-bridge-daemon"
 if [[ -x "$CONSOLE_SCRIPT" ]]; then
   DAEMON_ARGS=("$CONSOLE_SCRIPT")
 elif command -v cowork-to-code-bridge-daemon >/dev/null 2>&1; then
-  # On PATH but not under user scripts dir (e.g. system-wide install).
   DAEMON_ARGS=("$(command -v cowork-to-code-bridge-daemon)")
 elif "$PY" -c "import cowork_to_code_bridge.daemon" 2>/dev/null; then
-  # Fallback: invoke as a module via the resolved Python interpreter.
   DAEMON_ARGS=("$PY" "-m" "cowork_to_code_bridge.daemon")
 else
   c_red "  ✗ cowork-to-code-bridge daemon module not found after install"
@@ -529,71 +559,118 @@ else
 fi
 c_green "  ✓ daemon entry: ${DAEMON_ARGS[*]}"
 
-mkdir -p "$(dirname "$PLIST")"
-{
-  echo '<?xml version="1.0" encoding="UTF-8"?>'
-  echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
-  echo '<plist version="1.0">'
-  echo '<dict>'
-  echo '  <key>Label</key><string>dev.cowork-to-code-bridge.daemon</string>'
-  echo '  <key>ProgramArguments</key>'
-  echo '  <array>'
-  for arg in "${DAEMON_ARGS[@]}"; do
-    # Escape XML special chars in arg (just in case a path has & < >).
-    safe=$(printf '%s' "$arg" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
-    echo "    <string>$safe</string>"
-  done
-  echo '  </array>'
-  echo '  <key>EnvironmentVariables</key>'
-  echo '  <dict>'
-  echo "    <key>BRIDGE_ROOT</key><string>$BRIDGE_ROOT</string>"
-  echo "    <key>PATH</key><string>$USER_SCRIPTS_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"
-  echo '  </dict>'
-  echo '  <key>RunAtLoad</key><true/>'
-  echo '  <key>KeepAlive</key><true/>'
-  echo "  <key>StandardOutPath</key><string>$DAEMON_LOG</string>"
-  echo "  <key>StandardErrorPath</key><string>$DAEMON_ERR</string>"
-  echo "  <key>WorkingDirectory</key><string>$BRIDGE_ROOT</string>"
-  echo '</dict>'
-  echo '</plist>'
-} > "$PLIST"
-c_green "  ✓ plist written: $PLIST"
-
-# Tear down any prior registration before re-loading.
-UID_NUM="$(id -u)"
-DOMAIN="gui/$UID_NUM"
 LABEL="dev.cowork-to-code-bridge.daemon"
+daemon_up=0
 
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-  c_yellow "  → bootout existing agent"
-  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-fi
-# Legacy load -w cleanup for older installs.
-launchctl unload "$PLIST" 2>/dev/null || true
+if [[ "$SERVICE_MGR" == "launchd" ]]; then
+  # ── macOS: launchd user agent ──────────────────────────────────────────────
+  mkdir -p "$(dirname "$PLIST")"
+  {
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    echo '<plist version="1.0">'
+    echo '<dict>'
+    echo "  <key>Label</key><string>$LABEL</string>"
+    echo '  <key>ProgramArguments</key>'
+    echo '  <array>'
+    for arg in "${DAEMON_ARGS[@]}"; do
+      safe=$(printf '%s' "$arg" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+      echo "    <string>$safe</string>"
+    done
+    echo '  </array>'
+    echo '  <key>EnvironmentVariables</key>'
+    echo '  <dict>'
+    echo "    <key>BRIDGE_ROOT</key><string>$BRIDGE_ROOT</string>"
+    echo "    <key>PATH</key><string>$USER_SCRIPTS_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"
+    echo '  </dict>'
+    echo '  <key>RunAtLoad</key><true/>'
+    echo '  <key>KeepAlive</key><true/>'
+    echo "  <key>StandardOutPath</key><string>$DAEMON_LOG</string>"
+    echo "  <key>StandardErrorPath</key><string>$DAEMON_ERR</string>"
+    echo "  <key>WorkingDirectory</key><string>$BRIDGE_ROOT</string>"
+    echo '</dict>'
+    echo '</plist>'
+  } > "$PLIST"
+  c_green "  ✓ plist written: $PLIST"
 
-if launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; then
-  c_green "  ✓ launchctl bootstrap $DOMAIN succeeded"
+  UID_NUM="$(id -u)"
+  DOMAIN="gui/$UID_NUM"
+  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    c_yellow "  → bootout existing agent"
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  fi
+  launchctl unload "$PLIST" 2>/dev/null || true
+  if launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; then
+    c_green "  ✓ launchctl bootstrap $DOMAIN succeeded"
+  else
+    c_yellow "  ! launchctl bootstrap failed — falling back to legacy load -w"
+    launchctl load -w "$PLIST"
+  fi
+  launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
+  sleep 2
+
+  step "Verifying daemon"
+  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || \
+     launchctl list 2>/dev/null | grep -q "$LABEL"; then
+    c_green "  ✓ daemon registered with launchd"
+  else
+    c_red "  ✗ daemon failed to register"
+    tail -20 "$DAEMON_ERR" 2>/dev/null || true
+    exit 1
+  fi
+
 else
-  c_yellow "  ! launchctl bootstrap failed — falling back to legacy load -w"
-  launchctl load -w "$PLIST"
-fi
-launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
-sleep 2
+  # ── Linux: systemd --user unit ─────────────────────────────────────────────
+  UNIT_DIR="$HOME/.config/systemd/user"
+  UNIT="$UNIT_DIR/cowork-to-code-bridge.service"
+  mkdir -p "$UNIT_DIR"
+  # Build ExecStart with each arg shell-quoted.
+  EXECSTART=""
+  for arg in "${DAEMON_ARGS[@]}"; do EXECSTART+="'$arg' "; done
+  {
+    echo '[Unit]'
+    echo 'Description=cowork-to-code-bridge daemon (connect Claude to this machine)'
+    echo 'After=default.target'
+    echo
+    echo '[Service]'
+    echo 'Type=simple'
+    echo "Environment=BRIDGE_ROOT=$BRIDGE_ROOT"
+    echo "Environment=PATH=$USER_SCRIPTS_DIR:/usr/local/bin:/usr/bin:/bin"
+    echo "WorkingDirectory=$BRIDGE_ROOT"
+    echo "ExecStart=/bin/sh -lc \"exec $EXECSTART\""
+    echo 'Restart=always'
+    echo 'RestartSec=2'
+    echo "StandardOutput=append:$DAEMON_LOG"
+    echo "StandardError=append:$DAEMON_ERR"
+    echo
+    echo '[Install]'
+    echo 'WantedBy=default.target'
+  } > "$UNIT"
+  c_green "  ✓ systemd unit written: $UNIT"
 
-# ─── 7. Verify daemon is running ─────────────────────────────────────────────
-step "Verifying daemon"
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || \
-   launchctl list 2>/dev/null | grep -q "$LABEL"; then
-  c_green "  ✓ daemon registered with launchd"
-else
-  c_red "  ✗ daemon failed to register"
-  echo "  Check: $DAEMON_ERR"
-  tail -20 "$DAEMON_ERR" 2>/dev/null || true
-  exit 1
+  # Enable lingering so the user service survives logout and starts at boot.
+  if command -v loginctl >/dev/null 2>&1; then
+    loginctl enable-linger "$(id -un)" 2>/dev/null \
+      && c_green "  ✓ lingering enabled (survives logout/reboot)" \
+      || c_yellow "  ! could not enable lingering (service still runs while logged in)"
+  fi
+  systemctl --user daemon-reload 2>/dev/null || true
+  systemctl --user enable --now cowork-to-code-bridge.service 2>/dev/null \
+    || systemctl --user restart cowork-to-code-bridge.service 2>/dev/null || true
+  sleep 2
+
+  step "Verifying daemon"
+  if systemctl --user is-active --quiet cowork-to-code-bridge.service; then
+    c_green "  ✓ daemon active under systemd --user"
+  else
+    c_red "  ✗ systemd service is not active"
+    systemctl --user status cowork-to-code-bridge.service --no-pager 2>/dev/null | tail -15 || true
+    tail -20 "$DAEMON_ERR" 2>/dev/null || true
+    exit 1
+  fi
 fi
 
 # Wait up to 20s for the daemon to log its first heartbeat (cold caches are slow).
-daemon_up=0
 for i in $(seq 1 20); do
   if [[ -f "$DAEMON_LOG" ]] && grep -q "daemon up" "$DAEMON_LOG" 2>/dev/null; then
     c_green "  ✓ daemon log shows 'daemon up' (after ${i}s)"
@@ -651,28 +728,34 @@ fi
 # ─── 9. Done ─────────────────────────────────────────────────────────────────
 step "DONE. Bridge is installed and running."
 
+if [[ "$SERVICE_MGR" == "launchd" ]]; then
+  VERIFY_CMD="launchctl print gui/$(id -u)/$LABEL"
+else
+  VERIFY_CMD="systemctl --user status cowork-to-code-bridge.service"
+fi
+
 cat <<DONE
 
 $(c_green "✓ All set. You don't need to install anything in Cowork.")
 
 The connection is now available in EVERY Claude Cowork chat automatically —
-including new chats, new projects, and after you restart your Mac. There are
-no downloads and no "allow access" popups.
+including new chats, new projects, and after you restart your computer. There
+are no downloads and no "allow access" popups.
 
 Just open any Cowork chat and ask in plain English, e.g.:
 
-  • "build me a small web app on my Mac"
+  • "build me a small web app on my machine"
   • "run my tests and fix what's failing"
-  • "check my Mac's health"
+  • "check my machine's health"
   • "git push my project"
 
-Claude will hand the work to Claude Code on this Mac and bring back the result.
+Claude will hand the work to Claude Code on this machine and bring back the result.
 
 Bridge folder: $BRIDGE_ROOT
 Skill folder:  $HOME/.claude/skills/cowork-to-code-bridge
 
 Manual verification (optional):
-  launchctl print gui/$UID_NUM/$LABEL   # full agent state
+  $VERIFY_CMD   # service state
   cat $ENV_FILE                                       # token + bridge root
   tail -f $DAEMON_LOG                                 # live daemon output
 

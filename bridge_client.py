@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 def _resolve_bridge_root() -> Path:

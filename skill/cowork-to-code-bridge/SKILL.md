@@ -1,6 +1,6 @@
 ---
 name: cowork-to-code-bridge
-description: Connects Claude Cowork to Claude Code running on the user's Mac, so the whole machine is reachable from a Cowork chat. Use this skill whenever the user asks to do something that needs their actual Mac and can't be done in the Cowork sandbox — building or running an app, running tests, git push/pull, installing packages, npm/pip/brew/docker, checking the Mac's health/RAM/disk/processes, or any task they describe as "on my Mac". Also triggers on "build me an app", "run this on my Mac", "use Claude Code on my machine", "connect to my Mac", "check my Mac". The bridge hands the task to a real Claude Code agent on the Mac; it is idempotent and survives reboots.
+description: Connects Claude Cowork to Claude Code running on the user's own computer (macOS or Linux), so the whole machine is reachable from a Cowork chat. Use this skill whenever the user asks to do something that needs their actual machine and can't be done in the Cowork sandbox — building or running an app, running tests, git push/pull, installing packages, npm/pip/brew/docker, checking the machine's health/RAM/disk/processes, or any task they describe as "on my Mac" or "on my machine/server". Also triggers on "build me an app", "run this on my machine", "use Claude Code on my computer", "connect to my Mac", "check my machine". The bridge hands the task to a real Claude Code agent on the machine; it is idempotent and survives reboots.
 ---
 
 # cowork-to-code-bridge
@@ -38,8 +38,8 @@ print("BRIDGE LIVE" if daemon_alive(ping_timeout=10) else "DAEMON NOT REACHABLE"
   ```
 
   It takes ~30s, sets up the connection, and survives reboots. After they say
-  it's done, re-run Step 1. (macOS only — if their computer is Windows/Linux,
-  this bridge won't work; stop and tell them.)
+  it's done, re-run Step 1. (macOS and Linux are supported; if their computer is
+  Windows, this bridge won't work yet — stop and tell them.)
 
 ## Step 2 — hand a task to Claude Code on the Mac (the main use)
 

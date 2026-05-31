@@ -32,4 +32,4 @@ Claude Code on your Mac.
 - The canonical skill source is in this repo at
   [`skill/cowork-to-code-bridge/`](./skill/cowork-to-code-bridge/); the installer
   writes it to `~/.claude/skills/`.
-- macOS only.
+- macOS (launchd) and Linux (systemd) supported; Windows not yet.
