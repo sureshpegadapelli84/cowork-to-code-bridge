@@ -39,6 +39,7 @@ Start:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -51,7 +52,9 @@ from pathlib import Path
 from typing import Any
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-BRIDGE_ROOT = Path(os.environ.get("BRIDGE_ROOT", Path.home() / ".cowork-to-code-bridge")).expanduser()
+BRIDGE_ROOT = Path(
+    os.environ.get("BRIDGE_ROOT", Path.home() / ".cowork-to-code-bridge")
+).expanduser()
 SCRIPTS_DIR = Path(os.environ.get("BRIDGE_SCRIPTS", BRIDGE_ROOT / "scripts")).expanduser()
 QUEUE = BRIDGE_ROOT / "queue"
 RESULTS = BRIDGE_ROOT / "results"
@@ -256,27 +259,20 @@ def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
     """
     out_buf: list[str] = []
     err_buf: list[str] = []
-    try:
-        # Truncate/create the progress file at start.
+    # Truncate/create the progress file at start.
+    with contextlib.suppress(OSError):
         progress_file.write_text("")
-    except OSError:
-        pass
 
     def _tee(stream, buf, tag):
         # Read line-by-line; append to in-memory buffer AND the progress file.
         try:
             for line in iter(stream.readline, ""):
                 buf.append(line)
-                try:
-                    with progress_file.open("a") as pf:
-                        pf.write(line if tag == "out" else f"[stderr] {line}")
-                except OSError:
-                    pass
+                with contextlib.suppress(OSError), progress_file.open("a") as pf:
+                    pf.write(line if tag == "out" else f"[stderr] {line}")
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 stream.close()
-            except Exception:
-                pass
 
     try:
         proc = subprocess.Popen(

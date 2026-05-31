@@ -148,7 +148,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--bridge-root", default=None,
-        help="Override the bridge root directory (default: ~/.cowork-to-code-bridge or $BRIDGE_ROOT).",
+        help="Override the bridge root dir (default: ~/.cowork-to-code-bridge or $BRIDGE_ROOT).",
     )
     args = parser.parse_args()
 
@@ -196,7 +196,7 @@ def main() -> int:
         if pip_uninstall(args.yes):
             print(green(f"  ✓ {PACKAGE_NAME} uninstalled"))
         else:
-            print(yellow(f"  ! pip uninstall did not complete cleanly"))
+            print(yellow("  ! pip uninstall did not complete cleanly"))
 
     print(green("\nDone."))
     print(

@@ -1,5 +1,11 @@
 # Cowork-side usage examples
 
+> **Import note:** in a Cowork sandbox (the normal case) the client is the
+> global skill's file — use `from bridge_client import ...`. The
+> `from cowork_to_code_bridge import ...` form shown below is equivalent and
+> works where the full package is pip-installed (e.g. the terminal CLI). Same
+> API either way.
+
 After the Mac daemon is installed and the client is importable:
 
 ## Health check

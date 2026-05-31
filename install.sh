@@ -423,79 +423,26 @@ MN
 chmod +x "$BRIDGE_ROOT"/scripts/mac_*.sh
 c_green "  ✓ scripts installed: ping, hello, run_claude, mac_health, mac_ram, mac_disk, mac_top, mac_network"
 
-# ─── 5b. Write the single-file Cowork client into BRIDGE_ROOT ────────────────
-# This is the exact file the Cowork sandbox needs. We keep a copy on the Mac so
-# the DONE message can emit it as a paste block (no network fetch in Cowork ->
-# no egress popups).
-cat > "$BRIDGE_ROOT/bridge_client.py" <<'BRIDGECLIENT'
-"""bridge_client.py — single-file, stdlib-only Cowork client for cowork-to-code-bridge."""
-from __future__ import annotations
-import json, os, time, uuid
-from pathlib import Path
-from typing import Any
-__version__ = "0.3.0"
-
-def _resolve_bridge_root() -> Path:
-    env = os.environ.get("BRIDGE_ROOT")
-    if env:
-        return Path(env)
-    cwd_bridge = Path.cwd() / "bridge"
-    return cwd_bridge
-
-def _load_token(bridge_root: Path):
-    env_tok = os.environ.get("BRIDGE_TOKEN")
-    if env_tok:
-        return env_tok
-    env_file = bridge_root / ".env"
-    if not env_file.exists():
-        return None
-    for line in env_file.read_text().splitlines():
-        if line.strip().startswith("BRIDGE_TOKEN"):
-            _, _, v = line.partition("=")
-            return v.strip().strip('"').strip("'") or None
-    return None
-
-def call_remote(script, args=None, timeout=60, poll_interval=1.0, cwd=None,
-                env=None, bridge_root=None, idempotency_key=None) -> dict[str, Any]:
-    root = Path(bridge_root) if bridge_root else _resolve_bridge_root()
-    queue = root / "queue"; results = root / "results"
-    queue.mkdir(parents=True, exist_ok=True); results.mkdir(parents=True, exist_ok=True)
-    cmd_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
-    payload: dict[str, Any] = {"id": cmd_id, "script": script, "args": args or [],
-                               "timeout": timeout, "ts_submitted": time.time()}
-    if cwd: payload["cwd"] = cwd
-    if env: payload["env"] = env
-    if idempotency_key: payload["idempotency_key"] = idempotency_key
-    token = _load_token(root)
-    if token: payload["token"] = token
-    cmd_file = queue / f"{cmd_id}.json"
-    tmp = cmd_file.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload)); tmp.rename(cmd_file)
-    result_file = results / f"{cmd_id}.json"
-    deadline = time.time() + timeout + 5
-    while time.time() < deadline:
-        if result_file.exists():
-            try:
-                return json.loads(result_file.read_text())
-            except json.JSONDecodeError:
-                time.sleep(poll_interval); continue
-        time.sleep(poll_interval)
-    raise TimeoutError(f"bridge: no result for {cmd_id} within {timeout + 5}s. "
-                       f"Check that the daemon is running and BRIDGE_ROOT matches the Mac's .env.")
-
-def daemon_alive(bridge_root=None, ping_timeout=10) -> bool:
-    try:
-        r = call_remote("scripts/ping.sh", args=[], timeout=ping_timeout, bridge_root=bridge_root)
-        return r.get("exit_code") == 0
-    except TimeoutError:
-        return False
-
-if __name__ == "__main__":
-    alive = daemon_alive(ping_timeout=10)
-    print("BRIDGE LIVE" if alive else "DAEMON NOT REACHABLE")
-    raise SystemExit(0 if alive else 1)
-BRIDGECLIENT
-c_green "  ✓ Cowork client written to $BRIDGE_ROOT/bridge_client.py"
+# ─── 5b. Fetch the single-file Cowork client (one source of truth) ───────────
+# bridge_client.py is the EXACT file the Cowork sandbox imports. To avoid drift,
+# we fetch the canonical copy from the repo at install time (the Mac has network
+# — this runs in the user's terminal, not the sandbox). Falls back to the
+# installed package's client if the fetch fails offline.
+CLIENT_URL="https://raw.githubusercontent.com/$REPO/main/bridge_client.py"
+if curl -fsSL "$CLIENT_URL" -o "$BRIDGE_ROOT/bridge_client.py" 2>/dev/null \
+   && head -1 "$BRIDGE_ROOT/bridge_client.py" | grep -q "bridge_client"; then
+  c_green "  ✓ Cowork client fetched to $BRIDGE_ROOT/bridge_client.py"
+else
+  # Offline fallback: copy from the just-installed package.
+  PKG_CLIENT="$("$PY" -c 'import cowork_to_code_bridge, os; print(os.path.join(os.path.dirname(cowork_to_code_bridge.__file__), "client.py"))' 2>/dev/null || true)"
+  if [[ -n "$PKG_CLIENT" && -f "$PKG_CLIENT" ]]; then
+    cp "$PKG_CLIENT" "$BRIDGE_ROOT/bridge_client.py"
+    c_yellow "  ! fetch failed; used the installed package client as fallback"
+  else
+    c_red "  ✗ could not obtain bridge_client.py (no network and no package copy)."
+    exit 1
+  fi
+fi
 
 # ─── 5c. Install the GLOBAL Cowork skill (~/.claude/skills) ──────────────────
 # This is what makes the bridge work in EVERY Cowork session, every project,

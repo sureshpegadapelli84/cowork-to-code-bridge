@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import os
-from pathlib import Path
 
 import pytest
 
@@ -58,7 +56,7 @@ def test_e2e_normal_run_creates_journal_and_clears_marker(bridge):
     assert not (d.INFLIGHT / "1100_aaa.running").exists()
     assert (d.PROCESSED / "1100_aaa.json").exists()
     # Journal has received + started + completed.
-    events = [json.loads(l) for l in d.JOURNAL.read_text().splitlines()]
+    events = [json.loads(ln) for ln in d.JOURNAL.read_text().splitlines()]
     types = [e["event"] for e in events]
     assert types == ["received", "started", "completed"]
 

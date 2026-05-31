@@ -370,9 +370,9 @@ Developers: the full crash-recovery model (the journal, in-flight markers, and t
 
 ## Status & contributing
 
-**v0.2.0** — early, but solid. The core works and now survives crashes and reboots without repeating risky actions. A few rough edges remain (mainly the Mac installer's Python detection). Built for myself, open-sourced because it's useful to others.
+**v0.4.0** — early, but solid. The core works, survives crashes and reboots without repeating risky actions, installs as a global skill (one Mac command), and streams live progress for long tasks. Built for myself, open-sourced because it's useful to others. See the [CHANGELOG](CHANGELOG.md) for the full history.
 
-PRs welcome at [github.com/abhinaykrupa/cowork-to-code-bridge](https://github.com/abhinaykrupa/cowork-to-code-bridge). Issues triaged best-effort. Not "production-grade" until tagged `v1.0.0`.
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Issues triaged best-effort. Not "production-grade" until tagged `v1.0.0`. macOS only for now.
 
 ## License
 

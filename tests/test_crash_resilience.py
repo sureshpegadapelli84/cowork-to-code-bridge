@@ -23,6 +23,7 @@ def bridge(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIDGE_TOKEN", "test-token")
     # Force a fresh import so module-level paths pick up the new BRIDGE_ROOT.
     import importlib
+
     import cowork_to_code_bridge.daemon as d
     importlib.reload(d)
     for sub in (d.QUEUE, d.RESULTS, d.PROCESSED, d.INFLIGHT, d.PROGRESS, d.SCRIPTS_DIR):
@@ -105,7 +106,9 @@ def test_inflight_marker_with_completed_in_journal_is_just_cleanup(bridge):
     cmd_id = "1001_xyz"
     # Journal says we finished.
     d._journal_append({"id": cmd_id, "event": "received"})
-    d._journal_append({"id": cmd_id, "event": "completed", "result": {"exit_code": 0, "stdout": "good"}})
+    d._journal_append(
+        {"id": cmd_id, "event": "completed", "result": {"exit_code": 0, "stdout": "good"}}
+    )
     # Pre-existing result file from before the crash.
     (d.RESULTS / f"{cmd_id}.json").write_text(json.dumps({"exit_code": 0, "stdout": "good"}))
     # But the inflight marker was never deleted (crash between completed-write and marker-clear).

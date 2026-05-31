@@ -1,0 +1,61 @@
+# Changelog
+
+All notable changes to this project. Format loosely follows
+[Keep a Changelog](https://keepachangelog.com/); versions are the `pyproject.toml`
+/ `plugin.json` version.
+
+## [0.4.0]
+
+The big simplification: **install as a global skill, one Mac command, nothing in Cowork.**
+
+### Fixed
+- Installer now **fetches the canonical `bridge_client.py`** from the repo at
+  install time instead of embedding a hand-maintained copy, so the installed
+  skill can't ship a stale client (the embedded copy had drifted and lacked
+  streaming). Falls back to the installed package's client if offline.
+
+### Changed
+- **Architecture pivot to a global Claude skill.** The Cowork client now installs
+  once on the Mac into `~/.claude/skills/cowork-to-code-bridge/` and auto-loads
+  into *every* Cowork session — any project, after reboot — with **no fetch, no
+  paste, no popups, no `/plugin`.** This replaces the earlier URL-fetch /
+  base64-paste flows that tripped Cowork's network-egress permission popups.
+- Install is now a single Mac command (`curl … install.sh | bash`); it sets up
+  the daemon **and** drops the global skill.
+
+### Added
+- **Live progress streaming.** `call_remote_streaming(..., on_progress=cb)` tees a
+  running script's output to `progress/<id>.log` and emits it live, so long
+  builds/test runs aren't blind. The daemon streams via `Popen`.
+- **`run_claude.sh`** — hands a free-form task to a real Claude Code agent on the
+  Mac (the headline capability). Resolves the `claude` CLI robustly and
+  auto-installs it if missing (`BRIDGE_CLAUDE_AUTOINSTALL=0` to opt out).
+- **Mac system-info scripts** — `mac_health`, `mac_ram`, `mac_disk`, `mac_top`,
+  `mac_network` for instant "check my Mac" answers.
+- **Python auto-install** — if only Apple's stock Python 3.8 is present, the
+  installer brings up a modern Python (via Homebrew; `BRIDGE_PYTHON_AUTOINSTALL=0`
+  to opt out).
+- macOS-only guard in `install.sh` + prominent README banner.
+- README "How it works" diagram.
+
+### Removed
+- The `/plugin` + marketplace distribution path (didn't work inside Cowork).
+- URL-fetch / single-file-fetch / base64-paste onboarding (popup-prone).
+- Old `skills/setup` and `skills/run-on-mac` playbooks (superseded by the
+  global skill).
+
+## [0.2.0]
+
+### Added
+- **Crash resilience (Tier 1 + 2):** append-only journal, in-flight markers, and
+  recovery-on-startup so a daemon crash/reboot never silently re-runs a task
+  (exit code `-4` marks indeterminate).
+- **Idempotency keys:** retries with the same key return the cached result
+  instead of re-executing (safe for git push, deploys, etc.).
+- Crash-resilience + e2e idempotency test suites.
+
+## [0.1.0]
+
+- Initial file-based bridge: Cowork writes a JSON command to a shared queue, a
+  launchd daemon on the Mac runs whitelisted scripts and writes results back.
+  Token-authenticated, no network listener.
