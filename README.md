@@ -155,6 +155,7 @@ The install gives you these to start:
 - `port_check.sh` — shows what is listening on a TCP port
 - `docker_ps.sh` — lists running Docker containers
 - `pkg_outdated.sh` — lists outdated packages (brew on macOS; apt/dnf/yum/pacman on Linux)
+- `request_cowork.sh` — hand a request the *other* way: from Claude Code on your machine to a Cowork session (async inbox)
 - `ping.sh` — confirms the bridge works
 - `hello.sh` — echoes back a greeting
 
