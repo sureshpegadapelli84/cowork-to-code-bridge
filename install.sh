@@ -788,7 +788,7 @@ Always pass a unique \`idempotency_key\` — Claude Code tasks have side effects
 retry must not run twice.
 
 ## Step 3 — quick system checks (no agent)
-\`call_remote("scripts/mac_health.sh")\` · \`mac_ram.sh\` · \`mac_disk.sh\` · \`mac_top.sh\` · \`mac_network.sh\` · \`port_check.sh\` · \`docker_ps.sh\` · \`pkg_outdated.sh\`
+\`call_remote("scripts/mac_health.sh")\` · \`mac_ram.sh\` · \`mac_disk.sh\` · \`mac_top.sh\` · \`mac_network.sh\` · \`port_check.sh\` · \`docker_ps.sh\` · \`pkg_outdated.sh\` · \`git_status.sh <path>\`
 
 ## Results
 Dict with exit_code/stdout/stderr. Codes: -1 refused, -2 timeout, -3 internal,
@@ -831,7 +831,7 @@ Always pass a unique idempotency_key (tasks have side effects). For long builds,
 use call_remote_streaming(..., on_progress=cb).
 
 ## Quick checks (no agent)
-scripts/mac_health.sh · mac_ram.sh · mac_disk.sh · mac_top.sh · mac_network.sh · port_check.sh <port> · docker_ps.sh · pkg_outdated.sh
+scripts/mac_health.sh · mac_ram.sh · mac_disk.sh · mac_top.sh · mac_network.sh · port_check.sh <port> · docker_ps.sh · pkg_outdated.sh · git_status.sh <path>
 
 Results: dict with exit_code/stdout/stderr (-1 refused, -2 timeout, -3 internal,
 -4 crashed). Never claim success without exit_code 0 / BRIDGE LIVE.
