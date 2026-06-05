@@ -403,13 +403,15 @@ def run_one(cmd_path: Path, token_required: str | None,
             return
 
         if hook_result.returncode != 0:
-            rejection = (hook_result.stderr or hook_result.stdout or "plan rejected by approve_plan.sh").strip()
+            _fallback = "plan rejected by approve_plan.sh"
+            rejection = (hook_result.stderr or hook_result.stdout or _fallback).strip()
             write_result(cmd_id, {
                 "exit_code": -1,
                 "error": f"plan rejected: {rejection}",
                 "plan_rejected": True,
             })
-            log(f"  ✗ {cmd_id}: plan rejected by hook (exit {hook_result.returncode}): {rejection[:120]}")
+            _rc = hook_result.returncode
+            log(f"  ✗ {cmd_id}: plan rejected by hook (exit {_rc}): {rejection[:120]}")
             cmd_path.rename(PROCESSED / cmd_path.name)
             return
         log(f"  ✓ {cmd_id}: plan approved by hook")
