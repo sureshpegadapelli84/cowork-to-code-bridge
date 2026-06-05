@@ -140,6 +140,15 @@ Mostly — and the parts that need your attention are spelled out honestly below
 
 **Optional: plan approval gate.** If you want a programmatic last line of defense before any task runs, copy [`examples/allowed_scripts/approve_plan.sh`](./examples/allowed_scripts/approve_plan.sh) to `~/.cowork-to-code-bridge/scripts/approve_plan.sh` and make it executable. When Cowork submits a task with a `plan` field, the bridge runs your hook first — exit 0 to proceed, exit 2 to reject (the hook's message is returned to Cowork). The hook can block schema migrations, send you a phone notification, or require an interactive keystroke. If the file doesn't exist, the plan field is silently ignored and nothing changes.
 
+**Optional: per-task permission sandboxing.** By default, every `run_claude.sh` task runs under your global `CLAUDE_FLAGS`. You can let Cowork request a tighter permission scope per task with `permission_mode`. Valid modes (least to most permissive): `plan` (read-only), `acceptEdits` (file edits, no shell), `bypassPermissions` (full agent). Set a ceiling in your launchd/systemd unit so Cowork can only tune *down* from it, never *up*:
+
+```bash
+# In your launchd plist or ~/.cowork-to-code-bridge/.env:
+BRIDGE_PERMISSION_CEILING=acceptEdits   # Cowork may request 'plan' or 'acceptEdits' only
+```
+
+If `BRIDGE_PERMISSION_CEILING` is not set, any valid mode is accepted. If Cowork requests a mode above the ceiling, the task is rejected before any script runs.
+
 **Requirement for the Claude Code path:** `run_claude.sh` needs the Claude Code **CLI** (`claude`) installed on your Mac. **The Claude Desktop app alone is not enough** — it bundles its own copy but doesn't expose a `claude` command. If the CLI is missing, `run_claude.sh` tries to install it on the fly (`brew install claude-code`, or the official installer) and then proceeds; if that fails it returns the exact one-line install command. To turn off auto-install (and just get the install instructions instead), set `BRIDGE_CLAUDE_AUTOINSTALL=0`. The system-info scripts (`mac_health.sh`, etc.) don't need the CLI at all.
 
 You can [uninstall it completely with one command](#uninstall) at any time.

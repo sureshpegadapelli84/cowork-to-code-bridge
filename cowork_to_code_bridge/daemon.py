@@ -74,6 +74,29 @@ JOURNAL_WARN_BYTES = 10 * 1024 * 1024  # warn at 10 MB
 JOURNAL_ROTATE_BYTES = 50 * 1024 * 1024  # rotate at 50 MB (keep one .old)
 MAX_CMD_BYTES = 1 * 1024 * 1024  # reject command files larger than 1 MB (DoS guard)
 
+# ─── Per-task permission sandboxing ──────────────────────────────────────────
+# The owner sets a ceiling in their launchd/systemd unit (or .env) via
+# BRIDGE_PERMISSION_CEILING. Cowork can request any mode at or below the ceiling
+# per task via the permission_mode field; the daemon enforces the bound.
+#
+# Ordered from most-restrictive to least-restrictive. A caller may only request
+# a mode whose index is <= the ceiling's index.
+_PERMISSION_ORDER = ["plan", "acceptEdits", "bypassPermissions"]
+
+# Maps a permission_mode name to the --permission-mode flag for the claude CLI.
+_PERMISSION_FLAGS: dict[str, str] = {
+    "plan":               "--permission-mode plan",
+    "acceptEdits":        "--permission-mode acceptEdits",
+    "bypassPermissions":  "--permission-mode bypassPermissions",
+}
+
+def _permission_index(mode: str) -> int:
+    """Return the index of a mode in the order list, or -1 if unknown."""
+    try:
+        return _PERMISSION_ORDER.index(mode)
+    except ValueError:
+        return -1
+
 # Allow only relative paths inside scripts/, ending in .sh or .py.
 # Use fullmatch (not match) so the pattern must cover the ENTIRE string —
 # re.match only anchors the start, fullmatch anchors both ends.
@@ -473,6 +496,51 @@ def run_one(cmd_path: Path, token_required: str | None,
             log(f"  ! blocked caller attempt to override protected env var: {k}")
         else:
             env[k] = str(v)       # non-security vars: caller wins (e.g. PYTHONPATH)
+
+    # ─── per-task permission sandboxing ───────────────────────────────────────
+    # If the command carries a permission_mode field, validate it against the
+    # owner's BRIDGE_PERMISSION_CEILING and, if within bounds, inject a
+    # task-scoped CLAUDE_FLAGS that overrides the global one for this run only.
+    requested_mode = cmd.get("permission_mode")
+    if requested_mode is not None:
+        requested_mode = str(requested_mode).strip()
+        req_idx = _permission_index(requested_mode)
+        if req_idx == -1:
+            write_result(cmd_id, {
+                "exit_code": -1,
+                "error": (
+                    f"unknown permission_mode {requested_mode!r}. "
+                    f"Valid values: {_PERMISSION_ORDER}"
+                ),
+            })
+            log(f"  ✗ {cmd_id}: unknown permission_mode {requested_mode!r}")
+            cmd_path.rename(PROCESSED / cmd_path.name)
+            return
+
+        ceiling = os.environ.get("BRIDGE_PERMISSION_CEILING", "").strip()
+        if ceiling:
+            ceil_idx = _permission_index(ceiling)
+            if ceil_idx == -1:
+                log(f"  ! BRIDGE_PERMISSION_CEILING={ceiling!r} is not a valid mode — ignoring ceiling")
+                ceil_idx = len(_PERMISSION_ORDER) - 1  # treat unknown ceiling as no ceiling
+            if req_idx > ceil_idx:
+                write_result(cmd_id, {
+                    "exit_code": -1,
+                    "error": (
+                        f"permission_mode {requested_mode!r} exceeds owner ceiling "
+                        f"{ceiling!r}. The owner must raise BRIDGE_PERMISSION_CEILING "
+                        f"to allow this mode."
+                    ),
+                })
+                log(f"  ✗ {cmd_id}: permission_mode {requested_mode!r} > ceiling {ceiling!r}")
+                cmd_path.rename(PROCESSED / cmd_path.name)
+                return
+
+        # Within bounds — inject a task-scoped CLAUDE_FLAGS, overriding the
+        # global one for this invocation only.
+        task_flags = _PERMISSION_FLAGS[requested_mode]
+        env["CLAUDE_FLAGS"] = task_flags
+        log(f"  ⚑ {cmd_id}: per-task CLAUDE_FLAGS={task_flags!r}")
 
     # ─── in-flight marker + journal: started ──────────────────────────────────
     # Marker is written BEFORE subprocess.run. If we crash between this point

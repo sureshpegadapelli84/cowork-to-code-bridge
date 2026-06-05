@@ -73,6 +73,8 @@ def call_remote(
     env: dict[str, str] | None = None,
     bridge_root: Path | str | None = None,
     idempotency_key: str | None = None,
+    plan: str | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     """Submit a script invocation to the Mac daemon and wait for its result.
 
@@ -80,6 +82,9 @@ def call_remote(
       - `script` must be whitelisted on the Mac (e.g. "scripts/run_claude.sh").
       - `idempotency_key` makes retries safe: same key => the daemon runs the
         script once and returns the cached result (annotated idempotent_replay).
+      - `plan` (optional str): passed to approve_plan.sh hook if present.
+      - `permission_mode` (optional): one of 'plan', 'acceptEdits',
+        'bypassPermissions'. Validated against BRIDGE_PERMISSION_CEILING.
       - exit_code -4 = daemon crashed mid-run; treat as indeterminate.
     Raises TimeoutError if the daemon doesn't respond within timeout + 5s.
     """
@@ -103,6 +108,10 @@ def call_remote(
         payload["env"] = env
     if idempotency_key:
         payload["idempotency_key"] = idempotency_key
+    if plan is not None:
+        payload["plan"] = plan
+    if permission_mode is not None:
+        payload["permission_mode"] = permission_mode
 
     token = _load_token(root)
     if token:
@@ -134,7 +143,8 @@ def call_remote(
 
 def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
                           cwd=None, env=None, bridge_root=None,
-                          idempotency_key=None, on_progress=None) -> dict[str, Any]:
+                          idempotency_key=None, on_progress=None,
+                          plan=None, permission_mode=None) -> dict[str, Any]:
     """Like call_remote, but streams live output while the task runs.
 
     The daemon tees the script's output to progress/<id>.log; this polls it and
@@ -151,6 +161,8 @@ def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
     if cwd: payload["cwd"] = cwd
     if env: payload["env"] = env
     if idempotency_key: payload["idempotency_key"] = idempotency_key
+    if plan is not None: payload["plan"] = plan
+    if permission_mode is not None: payload["permission_mode"] = permission_mode
     token = _load_token(root)
     if token: payload["token"] = token
     cmd_file = queue / f"{cmd_id}.json"

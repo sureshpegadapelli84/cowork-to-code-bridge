@@ -76,6 +76,7 @@ def call_remote(
     bridge_root: Path | str | None = None,
     idempotency_key: str | None = None,
     plan: str | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     """Submit a script invocation to the Mac daemon and wait for its result.
 
@@ -101,6 +102,12 @@ def call_remote(
             The hook exits 0 to allow, 2 to reject (returning exit_code=-1
             with the hook's stderr as the error message). If the hook is
             absent the plan field is silently ignored.
+        permission_mode: Optional Claude Code permission scope for this task.
+            One of: ``'plan'`` (read-only), ``'acceptEdits'`` (edits, no shell),
+            ``'bypassPermissions'`` (full, dangerous). The daemon validates
+            this against the owner's ``BRIDGE_PERMISSION_CEILING`` — if the
+            requested mode exceeds the ceiling the task is rejected. If absent
+            the owner's global ``CLAUDE_FLAGS`` applies unchanged.
 
     Returns:
         Dict with keys: id, exit_code, stdout, stderr, ts_completed.
@@ -134,6 +141,8 @@ def call_remote(
         payload["idempotency_key"] = idempotency_key
     if plan is not None:
         payload["plan"] = plan
+    if permission_mode is not None:
+        payload["permission_mode"] = permission_mode
 
     token = _load_token(root)
     if token:
@@ -175,6 +184,7 @@ def call_remote_streaming(
     idempotency_key: str | None = None,
     on_progress=None,
     plan: str | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     """Like call_remote, but streams live output while the task runs.
 
@@ -210,6 +220,8 @@ def call_remote_streaming(
         payload["idempotency_key"] = idempotency_key
     if plan is not None:
         payload["plan"] = plan
+    if permission_mode is not None:
+        payload["permission_mode"] = permission_mode
     token = _load_token(root)
     if token:
         payload["token"] = token

@@ -70,6 +70,22 @@ print(r["stdout"])   # what the local Claude Code agent did + reported
 can edit/commit/push, so if the connection drops and you retry, the key makes the
 daemon return the cached result instead of running the agent twice.
 
+For tasks that only need read access, request a tighter permission scope:
+
+```python
+r = call_remote(
+    "scripts/run_claude.sh",
+    args=["Summarise the last 10 commits", "/Users/<them>/projects/app"],
+    timeout=120, idempotency_key="summarise-1",
+    permission_mode="plan",   # read-only: no edits, no shell commands
+)
+```
+
+Valid `permission_mode` values (least → most permissive): `"plan"`, `"acceptEdits"`,
+`"bypassPermissions"`. The daemon enforces the owner's `BRIDGE_PERMISSION_CEILING`
+\u2014 a mode above the ceiling is rejected before any script runs. Omit `permission_mode`
+to use the owner's global `CLAUDE_FLAGS` unchanged.
+
 ### Long tasks — stream live progress (don't wait blind)
 
 Builds and test runs can take minutes. Use `call_remote_streaming` so you see
