@@ -199,6 +199,10 @@ The install gives you these to start:
 - `docker_ps.sh` — lists running Docker containers
 - `git_status.sh` — `git status --short --branch` in any repo directory (pass the path as an argument)
 - `pkg_outdated.sh` — lists outdated packages (brew on macOS; apt/dnf/yum/pacman on Linux)
+- `list_scripts.sh` — lists every script the bridge can run, with descriptions (so Cowork can discover what's available)
+- `env_check.sh` — shows key environment values (PATH, `BRIDGE_ROOT`, `CLAUDE_FLAGS`, `claude` CLI) without leaking your token
+- `disk_hogs.sh` — biggest files/folders in a path (pass a directory and an optional count)
+- `open_browser.sh` — opens an `http(s)`/localhost URL in your default browser (handy after a local dev server starts)
 - `request_cowork.sh` — hand a request the *other* way: from Claude Code on your machine to a Cowork session (async inbox)
 - `ping.sh` — confirms the bridge works
 - `hello.sh` — echoes back a greeting

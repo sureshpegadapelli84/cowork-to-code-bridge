@@ -121,3 +121,96 @@ def test_generated_system_scripts_exit_zero_and_print_expected_sections(
 def test_example_system_scripts_match_install_templates(script_name: str, marker: str) -> None:
     example_path = REPO_ROOT / "examples" / "allowed_scripts" / script_name
     assert example_path.read_text() == _extract_script(script_name, marker)
+
+
+# ── newer utility scripts (list_scripts, env_check, disk_hogs, open_browser) ──
+
+NEW_SCRIPTS = [
+    ("list_scripts.sh", "LS"),
+    ("env_check.sh", "EC"),
+    ("disk_hogs.sh", "DH"),
+    ("open_browser.sh", "OB"),
+]
+
+
+@pytest.mark.parametrize(("script_name", "marker"), NEW_SCRIPTS)
+def test_new_example_scripts_match_install_templates(script_name: str, marker: str) -> None:
+    """The examples/ copy must be byte-identical to the install.sh heredoc."""
+    example_path = REPO_ROOT / "examples" / "allowed_scripts" / script_name
+    assert example_path.read_text() == _extract_script(script_name, marker)
+
+
+@pytest.fixture()
+def new_scripts(tmp_path: Path) -> Path:
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    for script_name, marker in NEW_SCRIPTS:
+        p = scripts_dir / script_name
+        p.write_text(_extract_script(script_name, marker))
+        p.chmod(0o755)
+    # list_scripts.sh describes whatever is in its own dir, so drop a couple of
+    # extra dummy scripts in to confirm it enumerates them.
+    (scripts_dir / "ping.sh").write_text("#!/usr/bin/env bash\n# ping.sh — health check.\nexit 0\n")
+    (scripts_dir / "ping.sh").chmod(0o755)
+    return scripts_dir
+
+
+def _run(path: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [str(path), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+
+
+def test_list_scripts_enumerates_dir(new_scripts: Path) -> None:
+    result = _run(new_scripts / "list_scripts.sh")
+    assert result.returncode == 0, result.stderr
+    assert "AVAILABLE BRIDGE SCRIPTS" in result.stdout
+    assert "ping.sh" in result.stdout
+    assert "env_check.sh" in result.stdout
+    # must not list itself
+    assert "list_scripts.sh " not in result.stdout
+
+
+def test_env_check_reports_without_leaking_token(new_scripts: Path) -> None:
+    secret = "SUPERSECRETTOKENVALUE12345"
+    env = {**os.environ, "LC_ALL": "C", "BRIDGE_TOKEN": secret}
+    result = subprocess.run(
+        [str(new_scripts / "env_check.sh")],
+        check=False, capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "BRIDGE ENVIRONMENT" in result.stdout
+    assert "BRIDGE_TOKEN" in result.stdout
+    # the VALUE must never appear — only "set"
+    assert secret not in result.stdout
+    assert "set" in result.stdout
+
+
+def test_disk_hogs_lists_and_validates(new_scripts: Path, tmp_path: Path) -> None:
+    target = tmp_path / "data"
+    target.mkdir()
+    (target / "big.bin").write_bytes(b"x" * 200_000)
+    ok = _run(new_scripts / "disk_hogs.sh", str(target), "5")
+    assert ok.returncode == 0, ok.stderr
+    assert "LARGEST ITEMS" in ok.stdout
+    # bad count is rejected
+    bad = _run(new_scripts / "disk_hogs.sh", str(target), "notanumber")
+    assert bad.returncode != 0
+    # missing dir is rejected
+    missing = _run(new_scripts / "disk_hogs.sh", str(tmp_path / "nope"))
+    assert missing.returncode != 0
+
+
+def test_open_browser_rejects_unsafe_urls(new_scripts: Path) -> None:
+    # no arg
+    assert _run(new_scripts / "open_browser.sh").returncode != 0
+    # file:// scheme
+    assert _run(new_scripts / "open_browser.sh", "file:///etc/passwd").returncode != 0
+    # bare path
+    assert _run(new_scripts / "open_browser.sh", "/etc/passwd").returncode != 0
+    # a non-http scheme
+    assert _run(new_scripts / "open_browser.sh", "ftp://example.com").returncode != 0

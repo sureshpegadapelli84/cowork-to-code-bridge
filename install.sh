@@ -622,6 +622,111 @@ REPO="${1:-$PWD}"
 cd "$REPO"
 git status --short --branch
 GS
+cat > "$BRIDGE_ROOT/scripts/list_scripts.sh" <<'LS'
+#!/usr/bin/env bash
+# list_scripts.sh — list every script the bridge can run, with its one-line description.
+# Lets Cowork discover what's available instead of guessing. Args: none.
+# Usage from Cowork: call_remote("scripts/list_scripts.sh")
+set -uo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "=== AVAILABLE BRIDGE SCRIPTS ==="
+echo "(call any of these with call_remote(\"scripts/<name>\"))"
+echo
+shopt -s nullglob
+found=0
+for f in "$DIR"/*.sh; do
+  name="$(basename "$f")"
+  [ "$name" = "list_scripts.sh" ] && continue
+  # Pull the first comment line after the shebang as the description.
+  desc="$(awk 'NR>1 && /^#/ {sub(/^# */,""); print; exit}' "$f")"
+  printf '  %-22s %s\n' "$name" "${desc:-(no description)}"
+  found=$((found + 1))
+done
+[ "$found" -eq 0 ] && echo "  (no scripts found in $DIR)"
+exit 0
+LS
+cat > "$BRIDGE_ROOT/scripts/env_check.sh" <<'EC'
+#!/usr/bin/env bash
+# env_check.sh — show the environment values Cowork and Claude Code care about.
+# Never prints secret VALUES (only whether they are set). Args: none.
+# Usage from Cowork: call_remote("scripts/env_check.sh")
+set -uo pipefail
+echo "=== BRIDGE ENVIRONMENT ==="
+printf '%-13s: %s\n' "PATH" "${PATH:-}"
+root="${BRIDGE_ROOT:-$HOME/.cowork-to-code-bridge}"
+if [ -d "$root" ]; then
+  printf '%-13s: %s  (exists)\n' "BRIDGE_ROOT" "$root"
+else
+  printf '%-13s: %s  (MISSING)\n' "BRIDGE_ROOT" "$root"
+fi
+if [ -n "${BRIDGE_TOKEN:-}" ]; then
+  printf '%-13s: set\n' "BRIDGE_TOKEN"
+elif [ -f "$root/.env" ] && grep -q '^BRIDGE_TOKEN=' "$root/.env" 2>/dev/null; then
+  printf '%-13s: set (in .env)\n' "BRIDGE_TOKEN"
+else
+  printf '%-13s: not set\n' "BRIDGE_TOKEN"
+fi
+printf '%-13s: %s\n' "CLAUDE_FLAGS" "${CLAUDE_FLAGS:-(not set)}"
+printf '%-13s: %s\n' "SHELL" "${SHELL:-unknown}"
+printf '%-13s: %s\n' "HOME" "${HOME:-unknown}"
+if [ "$(uname)" = "Darwin" ]; then
+  printf '%-13s: macOS %s\n' "OS" "$(sw_vers -productVersion 2>/dev/null || echo '?')"
+elif [ -r /etc/os-release ]; then
+  printf '%-13s: %s\n' "OS" "$(. /etc/os-release && echo "$PRETTY_NAME")"
+else
+  printf '%-13s: %s\n' "OS" "$(uname -s) $(uname -r)"
+fi
+claude_path="$(command -v claude 2>/dev/null || true)"
+printf '%-13s: %s\n' "claude CLI" "${claude_path:-not found on PATH}"
+exit 0
+EC
+cat > "$BRIDGE_ROOT/scripts/disk_hogs.sh" <<'DH'
+#!/usr/bin/env bash
+# disk_hogs.sh — biggest files and folders in a directory (default: home).
+# Args: [path] [count]   e.g. call_remote("scripts/disk_hogs.sh", args=["~/Downloads","15"])
+set -uo pipefail
+TARGET="${1:-$HOME}"
+COUNT="${2:-15}"
+# expand a leading ~ since args arrive as literal strings
+case "$TARGET" in "~"|"~/"*) TARGET="$HOME${TARGET#\~}";; esac
+if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+  echo "count must be a number, got: $COUNT" >&2; exit 1
+fi
+if [ ! -d "$TARGET" ]; then
+  echo "not a directory: $TARGET" >&2; exit 1
+fi
+echo "=== TOP $COUNT LARGEST ITEMS IN $TARGET ==="
+# du over immediate children; sort by size desc; human-readable.
+du -sh "$TARGET"/* "$TARGET"/.[!.]* 2>/dev/null \
+  | sort -rh \
+  | head -n "$COUNT"
+exit 0
+DH
+cat > "$BRIDGE_ROOT/scripts/open_browser.sh" <<'OB'
+#!/usr/bin/env bash
+# open_browser.sh — open a URL in the machine's default browser.
+# Args: <url>   e.g. call_remote("scripts/open_browser.sh", args=["http://localhost:3000"])
+set -uo pipefail
+URL="${1:-}"
+if [ -z "$URL" ]; then
+  echo "usage: open_browser.sh <url>" >&2; exit 1
+fi
+# Only allow http(s) and localhost-style targets; reject file:// and bare paths.
+if ! [[ "$URL" =~ ^https?:// ]] \
+   && ! [[ "$URL" =~ ^(localhost|127\.0\.0\.1)(:[0-9]+)?(/.*)?$ ]]; then
+  echo "refusing to open non-http URL: $URL" >&2; exit 1
+fi
+# normalise a bare localhost:PORT into a full URL
+[[ "$URL" =~ ^https?:// ]] || URL="http://$URL"
+if [ "$(uname)" = "Darwin" ]; then
+  open "$URL" && echo "opened: $URL"
+elif command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "$URL" >/dev/null 2>&1 && echo "opened: $URL"
+else
+  echo "no display / no opener available — open manually: $URL"
+fi
+exit 0
+OB
 cat > "$BRIDGE_ROOT/scripts/pkg_outdated.sh" <<'POD'
 #!/usr/bin/env bash
 # pkg_outdated.sh — list outdated system packages (macOS or Linux).
@@ -710,8 +815,8 @@ chmod +x "$BRIDGE_ROOT/scripts/request_cowork.sh"
 mkdir -p "$BRIDGE_ROOT/to_cowork" "$BRIDGE_ROOT/cowork_results"
 chmod 700 "$BRIDGE_ROOT/to_cowork" "$BRIDGE_ROOT/cowork_results" 2>/dev/null || true
 
-chmod +x "$BRIDGE_ROOT"/scripts/mac_*.sh "$BRIDGE_ROOT/scripts/port_check.sh" "$BRIDGE_ROOT/scripts/docker_ps.sh" "$BRIDGE_ROOT/scripts/pkg_outdated.sh" "$BRIDGE_ROOT/scripts/git_status.sh"
-c_green "  ✓ scripts installed: ping, hello, run_claude, mac_health, mac_ram, mac_disk, mac_top, mac_network, port_check, docker_ps, pkg_outdated, git_status, request_cowork"
+chmod +x "$BRIDGE_ROOT"/scripts/mac_*.sh "$BRIDGE_ROOT/scripts/port_check.sh" "$BRIDGE_ROOT/scripts/docker_ps.sh" "$BRIDGE_ROOT/scripts/pkg_outdated.sh" "$BRIDGE_ROOT/scripts/git_status.sh" "$BRIDGE_ROOT/scripts/list_scripts.sh" "$BRIDGE_ROOT/scripts/env_check.sh" "$BRIDGE_ROOT/scripts/disk_hogs.sh" "$BRIDGE_ROOT/scripts/open_browser.sh"
+c_green "  ✓ scripts installed: ping, hello, run_claude, mac_health, mac_ram, mac_disk, mac_top, mac_network, port_check, docker_ps, pkg_outdated, git_status, list_scripts, env_check, disk_hogs, open_browser, request_cowork"
 
 # ─── 5b. Fetch the single-file Cowork client (one source of truth) ───────────
 # bridge_client.py is the EXACT file the Cowork sandbox imports. To avoid drift,

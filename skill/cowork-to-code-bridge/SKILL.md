@@ -105,6 +105,13 @@ For simple, fast system queries, call a ready-made script directly:
 | "what Docker containers are running?" | `call_remote("scripts/docker_ps.sh")` |
 | "what's the git status of ~/myproject?" | `call_remote("scripts/git_status.sh", args=["/path/to/repo"])` |
 | "any outdated packages?" | `call_remote("scripts/pkg_outdated.sh")` |
+| "what scripts can you run on my machine?" | `call_remote("scripts/list_scripts.sh")` |
+| "show my machine's env / PATH / claude CLI" | `call_remote("scripts/env_check.sh")` |
+| "what's eating disk in ~/Downloads?" | `call_remote("scripts/disk_hogs.sh", args=["~/Downloads", "15"])` |
+| "open localhost:3000 in my browser" | `call_remote("scripts/open_browser.sh", args=["http://localhost:3000"])` |
+
+**Tip:** if you're unsure what's available, call `list_scripts.sh` first — it
+returns every script the bridge can run, with a one-line description of each.
 
 For a repeatable custom action, help the user save a small script in
 `~/.cowork-to-code-bridge/scripts/` on their Mac, then call it by name.
