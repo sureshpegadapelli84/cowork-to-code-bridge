@@ -783,8 +783,148 @@ fi
 MCPAUDIT
 chmod +x "$BRIDGE_ROOT/scripts/mcp_audit.sh"
 
+# process_kill.sh — let Cowork terminate a named process or PID on this machine.
+# Safety guards: refuses PID ≤ 10, protected names (launchd/kernel_task/systemd/init),
+# refuses multiple matches unless --all is passed. Sends SIGTERM (not SIGKILL).
+# BRIDGE_PGREP_CMD / BRIDGE_KILL_CMD env vars allow test injection.
+cat > "$BRIDGE_ROOT/scripts/process_kill.sh" <<'PK'
+#!/usr/bin/env bash
+# process_kill.sh — terminate a named process or PID on this machine.
+#
+# Usage
+# -----
+#   process_kill.sh <name|PID> [--all]
+#
+#   Name path: exact name match via pgrep -x.
+#              Refuses if >1 match unless --all is passed.
+#   PID path:  numeric PID, must exist and be > 10.
+#
+# Safety guards
+# -------------
+#   - PID ≤ 10 refused (kernel/init territory on all UNIX-like systems)
+#   - Protected names refused: launchd, kernel_task, systemd, init, kernel, kthreadd
+#   - Sends SIGTERM (graceful), never SIGKILL
+#   - Confirms the process is gone after the signal
+#
+# Works on macOS and Linux. No deps beyond bash + coreutils.
+#
+# Testability hooks (for unit tests — not needed in normal use)
+#   BRIDGE_PGREP_CMD  path to a fake pgrep binary
+#   BRIDGE_KILL_CMD   path to a fake kill binary
+set -uo pipefail
+
+BRIDGE_PGREP_CMD="${BRIDGE_PGREP_CMD:-pgrep}"
+BRIDGE_KILL_CMD="${BRIDGE_KILL_CMD:-kill}"
+
+TARGET="${1:?usage: process_kill.sh <name|PID> [--all]}"
+ALL_FLAG=0
+shift || true
+for arg in "$@"; do [[ "$arg" == "--all" ]] && ALL_FLAG=1; done
+
+PROTECTED_NAMES=("launchd" "kernel_task" "systemd" "init" "kernel" "kthreadd")
+
+_is_protected() {
+  local name="$1"
+  for pname in "${PROTECTED_NAMES[@]}"; do
+    [[ "$name" == "$pname" ]] && return 0
+  done
+  return 1
+}
+
+# Refuse protected names before touching pgrep or kill.
+if _is_protected "$TARGET"; then
+  echo "ERROR: refusing to kill protected process: $TARGET" >&2
+  exit 1
+fi
+
+# ─── PID path ─────────────────────────────────────────────────────────────────
+if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+  PID="$TARGET"
+
+  if (( PID <= 10 )); then
+    echo "ERROR: refusing to kill PID $PID (≤ 10 is kernel/init territory)" >&2
+    exit 1
+  fi
+
+  # Verify the process exists before doing anything.
+  if ! "$BRIDGE_KILL_CMD" -0 "$PID" 2>/dev/null; then
+    echo "ERROR: no process with PID $PID" >&2
+    exit 1
+  fi
+
+  # Resolve the process name and guard protected names reached by PID.
+  PROC_NAME="$(ps -p "$PID" -o comm= 2>/dev/null | tr -d ' ' || echo '?')"
+  if _is_protected "$PROC_NAME"; then
+    echo "ERROR: refusing to kill protected process: $PROC_NAME (PID $PID)" >&2
+    exit 1
+  fi
+
+  echo "Sending SIGTERM to PID $PID ($PROC_NAME)..."
+  "$BRIDGE_KILL_CMD" -TERM "$PID"
+
+  # Wait up to 3 s for the process to exit.
+  for i in 1 2 3 4 5 6; do
+    sleep 0.5
+    if ! "$BRIDGE_KILL_CMD" -0 "$PID" 2>/dev/null; then
+      echo "✓ PID $PID ($PROC_NAME) is gone"
+      exit 0
+    fi
+  done
+  echo "⚠ PID $PID ($PROC_NAME) still alive after 3s — may need SIGKILL" >&2
+  exit 1
+fi
+
+# ─── Name path ────────────────────────────────────────────────────────────────
+# pgrep -x: exact name match only (won't kill 'rail' when asked for 'rails').
+PIDS="$("$BRIDGE_PGREP_CMD" -x "$TARGET" 2>/dev/null || true)"
+
+if [[ -z "$PIDS" ]]; then
+  echo "ERROR: no process named '$TARGET' found" >&2
+  exit 1
+fi
+
+PID_COUNT="$(echo "$PIDS" | wc -l | tr -d ' ')"
+
+if [[ "$PID_COUNT" -gt 1 && "$ALL_FLAG" -eq 0 ]]; then
+  echo "ERROR: $PID_COUNT processes named '$TARGET' found (PIDs: $(echo "$PIDS" | tr '\n' ' '))" >&2
+  echo "  Pass --all to kill all of them, or use a specific PID instead." >&2
+  exit 1
+fi
+
+KILLED=0
+while IFS= read -r pid; do
+  [[ -z "$pid" ]] && continue
+  if (( pid <= 10 )); then
+    echo "  skipping PID $pid (≤ 10)" >&2
+    continue
+  fi
+  echo "Sending SIGTERM to PID $pid ($TARGET)..."
+  if "$BRIDGE_KILL_CMD" -TERM "$pid" 2>/dev/null; then
+    KILLED=$(( KILLED + 1 ))
+  else
+    echo "  WARNING: could not send SIGTERM to PID $pid" >&2
+  fi
+done <<< "$PIDS"
+
+if [[ "$KILLED" -eq 0 ]]; then
+  echo "ERROR: no processes were killed" >&2
+  exit 1
+fi
+
+# Brief pause then confirm the process(es) are gone.
+sleep 0.5
+REMAINING="$("$BRIDGE_PGREP_CMD" -x "$TARGET" 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+if [[ "$REMAINING" -eq 0 ]]; then
+  echo "✓ $KILLED '$TARGET' process(es) terminated"
+else
+  echo "⚠ $REMAINING '$TARGET' process(es) still alive after SIGTERM — may need SIGKILL" >&2
+  exit 1
+fi
+PK
+chmod +x "$BRIDGE_ROOT/scripts/process_kill.sh"
+
 chmod +x "$BRIDGE_ROOT"/scripts/mac_*.sh "$BRIDGE_ROOT/scripts/port_check.sh" "$BRIDGE_ROOT/scripts/docker_ps.sh" "$BRIDGE_ROOT/scripts/pkg_outdated.sh" "$BRIDGE_ROOT/scripts/git_status.sh"
-c_green "  ✓ scripts installed: ping, hello, run_claude, mac_health, mac_ram, mac_disk, mac_top, mac_network, port_check, docker_ps, pkg_outdated, git_status, request_cowork, mcp_audit"
+c_green "  ✓ scripts installed: ping, hello, run_claude, mac_health, mac_ram, mac_disk, mac_top, mac_network, port_check, docker_ps, pkg_outdated, git_status, request_cowork, mcp_audit, process_kill"
 
 # ─── 5b. Fetch the single-file Cowork client (one source of truth) ───────────
 # bridge_client.py is the EXACT file the Cowork sandbox imports. To avoid drift,
@@ -898,7 +1038,7 @@ Status dict keys: \`elapsed_s\` (int), \`last_line\` (str), \`state\` ("running"
 \`exit_code\` is added on final write. The file is cleaned up after the result is written.
 
 ## Step 3 — quick system checks (no agent)
-\`call_remote("scripts/mac_health.sh")\` · \`mac_ram.sh\` · \`mac_disk.sh\` · \`mac_top.sh\` · \`mac_network.sh\` · \`port_check.sh\` · \`docker_ps.sh\` · \`pkg_outdated.sh\` · \`git_status.sh <path>\` · \`mcp_audit.sh\`
+\`call_remote("scripts/mac_health.sh")\` · \`mac_ram.sh\` · \`mac_disk.sh\` · \`mac_top.sh\` · \`mac_network.sh\` · \`port_check.sh\` · \`docker_ps.sh\` · \`pkg_outdated.sh\` · \`git_status.sh <path>\` · \`mcp_audit.sh\` · \`process_kill.sh <name|PID> [--all]\`
 
 ## Step 3b — cross-surface MCP audit
 
