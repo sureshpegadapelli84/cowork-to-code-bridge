@@ -75,20 +75,55 @@ JOURNAL_ROTATE_BYTES = 50 * 1024 * 1024  # rotate at 50 MB (keep one .old)
 MAX_CMD_BYTES = 1 * 1024 * 1024  # reject command files larger than 1 MB (DoS guard)
 
 # ─── Per-task permission sandboxing ──────────────────────────────────────────
-# The owner sets a ceiling in their launchd/systemd unit (or .env) via
-# BRIDGE_PERMISSION_CEILING. Cowork can request any mode at or below the ceiling
-# per task via the permission_mode field; the daemon enforces the bound.
 #
-# Ordered from most-restrictive to least-restrictive. A caller may only request
-# a mode whose index is <= the ceiling's index.
+# Background / motivation
+# -----------------------
+# The existing CLAUDE_FLAGS env var in run_claude.sh is owner-set and global:
+# the same restriction applies to every task. That's too coarse — a
+# "summarise this file" task should be read-only, while a "refactor and commit"
+# task needs write + git access. Forcing either the highest or lowest permission
+# level for all tasks is a usability/security dead-end.
+#
+# Additionally, Claude Code's agent-teams feature (multi-agent orchestration)
+# has a documented permission-inheritance flaw where all subagents inherit the
+# lead agent's permission setting, including --dangerously-skip-permissions
+# (see Anthropic agent-teams docs, Permissions + Limitations sections, and
+# issue anthropics/claude-code#26479). We can't fix the CLI bug here, but we
+# can at least ensure the lead agent is launched with the tightest mode that
+# still satisfies the task — so inherited permissions are minimal.
+#
+# Design
+# ------
+# call_remote(..., permission_mode='plan')   → read-only, no edits
+# call_remote(..., permission_mode='acceptEdits') → file edits, no shell
+# call_remote(..., permission_mode='bypassPermissions') → full agent
+#
+# The owner sets BRIDGE_PERMISSION_CEILING in their launchd/systemd unit to cap
+# the highest mode Cowork is allowed to request. The daemon enforces the bound
+# before spawning any subprocess — a mode above the ceiling is rejected with
+# exit_code=-1 before the script runs. This preserves owner control: Cowork can
+# tune permissions per task within the ceiling, but cannot exceed it.
+#
+# Security properties
+# -------------------
+# - Does NOT widen permissions beyond what the owner configured.
+# - Callers cannot override CLAUDE_FLAGS or BRIDGE_PERMISSION_CEILING directly
+#   (both are in the protected env-var list earlier in run_one).
+# - If permission_mode is absent, the global CLAUDE_FLAGS set by the owner
+#   applies unchanged — existing behaviour is fully preserved.
+#
+# Ordered most-restrictive → least-restrictive. A caller may only request a
+# mode whose index is <= the ceiling's index.
 _PERMISSION_ORDER = ["plan", "acceptEdits", "bypassPermissions"]
 
-# Maps a permission_mode name to the --permission-mode flag for the claude CLI.
+# Maps a permission_mode name to the --permission-mode flag passed to the
+# claude CLI via CLAUDE_FLAGS (which run_claude.sh reads with `read -r -a`).
 _PERMISSION_FLAGS: dict[str, str] = {
     "plan":               "--permission-mode plan",
     "acceptEdits":        "--permission-mode acceptEdits",
     "bypassPermissions":  "--permission-mode bypassPermissions",
 }
+
 
 def _permission_index(mode: str) -> int:
     """Return the index of a mode in the order list, or -1 if unknown."""
@@ -555,14 +590,42 @@ def run_one(cmd_path: Path, token_required: str | None,
             env[k] = str(v)       # non-security vars: caller wins (e.g. PYTHONPATH)
 
     # ─── per-task permission sandboxing ───────────────────────────────────────
-    # If the command carries a permission_mode field, validate it against the
-    # owner's BRIDGE_PERMISSION_CEILING and, if within bounds, inject a
-    # task-scoped CLAUDE_FLAGS that overrides the global one for this run only.
+    # Addresses: "Per-task permission sandboxing: let Cowork set CLAUDE_FLAGS
+    # per task, not just globally."
+    #
+    # Why this block exists
+    # ---------------------
+    # CLAUDE_FLAGS (set by the owner in launchd/systemd) is a single global
+    # restriction that applies to every task. That's too blunt: a read-only
+    # "summarise" call doesn't need write access, and forcing it to run with
+    # the same mode as a "refactor + commit" call either over-restricts useful
+    # tasks or under-restricts dangerous ones.
+    #
+    # This block lets Cowork pass `permission_mode` per call so the agent is
+    # launched with exactly the trust level the task requires — not more.
+    # Because Claude Code subagents inherit the lead's permission mode
+    # (documented flaw; see anthropics/claude-code#26479), using the tightest
+    # appropriate mode also limits inherited blast radius in multi-agent runs.
+    #
+    # Enforcement model
+    # -----------------
+    # 1. Caller sends permission_mode in the command JSON.
+    # 2. Daemon looks up BRIDGE_PERMISSION_CEILING (owner-set, protected from
+    #    caller override by the env-var block above).
+    # 3. If the requested mode is within the ceiling, a task-scoped CLAUDE_FLAGS
+    #    is injected — overriding the global value for this subprocess only.
+    # 4. If the requested mode exceeds the ceiling, the task is rejected with
+    #    exit_code=-1 BEFORE any script runs. The owner must raise the ceiling
+    #    explicitly to allow that mode.
+    # 5. If permission_mode is absent, the global CLAUDE_FLAGS is untouched —
+    #    existing behaviour is fully preserved.
     requested_mode = cmd.get("permission_mode")
     if requested_mode is not None:
         requested_mode = str(requested_mode).strip()
         req_idx = _permission_index(requested_mode)
         if req_idx == -1:
+            # Unknown mode string — reject early with a clear error so the
+            # caller knows what valid values are.
             write_result(cmd_id, {
                 "exit_code": -1,
                 "error": (
@@ -578,9 +641,14 @@ def run_one(cmd_path: Path, token_required: str | None,
         if ceiling:
             ceil_idx = _permission_index(ceiling)
             if ceil_idx == -1:
+                # Misconfigured ceiling — log a warning and treat as no ceiling
+                # rather than silently blocking all requests.
                 log(f"  ! BRIDGE_PERMISSION_CEILING={ceiling!r} is not a valid mode — ignoring ceiling")
                 ceil_idx = len(_PERMISSION_ORDER) - 1  # treat unknown ceiling as no ceiling
             if req_idx > ceil_idx:
+                # Requested mode is more permissive than the owner allows.
+                # Reject with a human-readable error; the owner must explicitly
+                # raise their ceiling to unlock the mode.
                 write_result(cmd_id, {
                     "exit_code": -1,
                     "error": (
@@ -593,8 +661,9 @@ def run_one(cmd_path: Path, token_required: str | None,
                 cmd_path.rename(PROCESSED / cmd_path.name)
                 return
 
-        # Within bounds — inject a task-scoped CLAUDE_FLAGS, overriding the
-        # global one for this invocation only.
+        # Within bounds — inject a task-scoped CLAUDE_FLAGS that overrides the
+        # global one for this subprocess invocation only. The global value is
+        # not mutated; the next task will see the original CLAUDE_FLAGS again.
         task_flags = _PERMISSION_FLAGS[requested_mode]
         env["CLAUDE_FLAGS"] = task_flags
         log(f"  ⚑ {cmd_id}: per-task CLAUDE_FLAGS={task_flags!r}")

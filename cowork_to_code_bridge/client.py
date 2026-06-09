@@ -103,12 +103,25 @@ def call_remote(
             The hook exits 0 to allow, 2 to reject (returning exit_code=-1
             with the hook's stderr as the error message). If the hook is
             absent the plan field is silently ignored.
-        permission_mode: Optional Claude Code permission scope for this task.
-            One of: ``'plan'`` (read-only), ``'acceptEdits'`` (edits, no shell),
-            ``'bypassPermissions'`` (full, dangerous). The daemon validates
-            this against the owner's ``BRIDGE_PERMISSION_CEILING`` — if the
-            requested mode exceeds the ceiling the task is rejected. If absent
-            the owner's global ``CLAUDE_FLAGS`` applies unchanged.
+        permission_mode: Optional per-task Claude Code permission scope.
+            One of (least → most permissive):
+
+            * ``'plan'``               — read-only; agent can propose but not edit
+            * ``'acceptEdits'``        — file edits allowed, no shell commands
+            * ``'bypassPermissions'``  — full agent; use only when necessary
+
+            The daemon validates this against the owner's
+            ``BRIDGE_PERMISSION_CEILING`` env var. If the requested mode
+            exceeds the ceiling the task is rejected with exit_code=-1 before
+            any script runs. If absent, the owner's global ``CLAUDE_FLAGS``
+            applies unchanged (existing behaviour preserved).
+
+            Use this to give each task exactly the trust level it needs —
+            read-only summarise calls get ``'plan'``, write+commit tasks get
+            ``'acceptEdits'``. This also limits inherited permissions in
+            Claude Code's multi-agent (agent-teams) mode, where subagents
+            inherit the lead agent's permission setting
+            (see anthropics/claude-code#26479).
 
     Returns:
         Dict with keys: id, exit_code, stdout, stderr, ts_completed.

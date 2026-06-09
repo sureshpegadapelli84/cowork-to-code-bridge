@@ -84,8 +84,15 @@ def call_remote(
       - `idempotency_key` makes retries safe: same key => the daemon runs the
         script once and returns the cached result (annotated idempotent_replay).
       - `plan` (optional str): passed to approve_plan.sh hook if present.
-      - `permission_mode` (optional): one of 'plan', 'acceptEdits',
-        'bypassPermissions'. Validated against BRIDGE_PERMISSION_CEILING.
+      - `permission_mode` (optional): per-task Claude Code permission scope.
+        One of 'plan' (read-only), 'acceptEdits' (file edits, no shell),
+        'bypassPermissions' (full agent). The daemon validates this against
+        the owner's BRIDGE_PERMISSION_CEILING — a mode above the ceiling is
+        rejected with exit_code=-1 before any script runs. If absent, the
+        owner's global CLAUDE_FLAGS applies unchanged. Use this to give each
+        task exactly the trust level it needs and to limit inherited
+        permissions in Claude Code's multi-agent mode
+        (ref: anthropics/claude-code#26479).
       - exit_code -4 = daemon crashed mid-run; treat as indeterminate.
     Raises TimeoutError if the daemon doesn't respond within timeout + 5s.
     """
