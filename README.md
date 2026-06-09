@@ -159,6 +159,8 @@ You can [uninstall it completely with one command](#uninstall) at any time.
 
 ## What can I ask for?
 
+**See [docs/RECIPES.md](docs/RECIPES.md) for 10 copy-pasteable examples** — FastAPI from scratch, fix failing tests, disk cleanup, release tagging, PR review, daily standup digest, and more.
+
 **The main thing: hand a task to Claude Code on your Mac.** The install ships a script called `run_claude.sh` that does exactly this. From Cowork you say something like *"have Claude Code on my Mac run the tests and fix what breaks"* and a real Claude Code agent on your machine carries it out, then reports back. That's the headline feature — Cowork delegating to a full local agent.
 
 The install gives you these to start:
