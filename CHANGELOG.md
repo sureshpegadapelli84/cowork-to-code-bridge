@@ -11,6 +11,9 @@ All notable changes to this project. Format loosely follows
   `pip install` docs, `install.sh` version floor `>=0.5.1`, and PyPI URL in
   `pyproject.toml`. Maintainer: follow [docs/RELEASING.md](docs/RELEASING.md) to
   publish the first release.
+- **Cowork Recipes doc (#38).** Rewrote [docs/RECIPES.md](docs/RECIPES.md) with
+  10 plain-English, copy-paste tasks (FastAPI health check, test-fix-commit,
+  disk cleanup with confirmation, release tagging, dev-server screenshot, and more).
 
 ## [0.5.1] - 2026-06-08
 
