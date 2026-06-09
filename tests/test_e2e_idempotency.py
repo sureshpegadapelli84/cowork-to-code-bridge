@@ -196,3 +196,65 @@ def test_e2e_caller_cannot_override_protected_env_vars(bridge):
 
     # Clean up env
     del os.environ["CLAUDE_FLAGS"]
+
+
+# ── status file tests ─────────────────────────────────────────────────────────
+
+def test_run_streaming_writes_final_status_json(bridge):
+    """_run_streaming must write a .status.json with state=done on success."""
+    d, _ = bridge
+    script = d.SCRIPTS_DIR / "statustest.sh"
+    script.write_text("#!/bin/bash\necho 'step one'\necho 'step two'\n")
+    script.chmod(0o755)
+
+    progress_file = d.PROGRESS / "test_run.log"
+    result = d._run_streaming(
+        ["bash", str(script)],
+        str(d.BRIDGE_ROOT),
+        {},
+        5,
+        progress_file,
+    )
+
+    assert result["exit_code"] == 0
+    status_file = d.PROGRESS / "test_run.status.json"
+    assert status_file.exists(), "status.json must exist after _run_streaming returns"
+    status = json.loads(status_file.read_text())
+    assert status["state"] == "done"
+    assert status["exit_code"] == 0
+    assert isinstance(status["elapsed_s"], int) and status["elapsed_s"] >= 0
+    # last_line should reflect the final non-empty output line
+    assert "step two" in status["last_line"]
+
+
+def test_run_streaming_writes_error_status_on_nonzero_exit(bridge):
+    """_run_streaming must write state=error when the script exits non-zero."""
+    d, _ = bridge
+    script = d.SCRIPTS_DIR / "failtest.sh"
+    script.write_text("#!/bin/bash\necho 'about to fail'\nexit 1\n")
+    script.chmod(0o755)
+
+    progress_file = d.PROGRESS / "test_fail.log"
+    result = d._run_streaming(
+        ["bash", str(script)], str(d.BRIDGE_ROOT), {}, 5, progress_file,
+    )
+
+    assert result["exit_code"] == 1
+    status_file = d.PROGRESS / "test_fail.status.json"
+    assert status_file.exists()
+    status = json.loads(status_file.read_text())
+    assert status["state"] == "error"
+    assert status["exit_code"] == 1
+
+
+def test_e2e_status_file_cleaned_up_after_run_one(bridge):
+    """run_one must clean up both .log and .status.json after writing the result."""
+    d, _ = bridge
+    terminal, cache = {}, {}
+    f = _enqueue(d, "1700_sta")
+    d.run_one(f, "test-token", terminal, cache)
+
+    assert not (d.PROGRESS / "1700_sta.log").exists(), ".log must be cleaned up"
+    assert not (d.PROGRESS / "1700_sta.status.json").exists(), ".status.json must be cleaned up"
+    res = json.loads((d.RESULTS / "1700_sta.json").read_text())
+    assert res["exit_code"] == 0

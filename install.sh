@@ -763,6 +763,32 @@ print(r["exit_code"]); print(r["stdout"])
 Always pass a unique \`idempotency_key\` — Claude Code tasks have side effects, so a
 retry must not run twice.
 
+## Step 2b — live status ticker (optional, for long tasks)
+
+Use \`on_status\` to show a spinner line that updates in-place every ~2 s without
+dumping the raw log. \`on_progress\` and \`on_status\` are independent; use either or both.
+
+\`\`\`python
+from bridge_client import call_remote_streaming
+import sys
+
+def on_status(s):
+    SPINNER = "⣾⣽⣻⢿⡿⣟⣯⣷"
+    tick = s["elapsed_s"] % len(SPINNER)
+    line = s["last_line"][:60]
+    print(f"\r  {SPINNER[tick]} {line}… ({s['elapsed_s']}s elapsed)", end="", flush=True)
+
+r = call_remote_streaming("scripts/run_claude.sh",
+    args=["Run the tests and fix failures", "/Users/<them>/projects/repo"],
+    timeout=600, idempotency_key="test-run-1",
+    on_status=on_status)
+print()  # newline after spinner
+print(r["exit_code"]); print(r["stdout"])
+\`\`\`
+
+Status dict keys: \`elapsed_s\` (int), \`last_line\` (str), \`state\` ("running"→"done"/"error").
+\`exit_code\` is added on final write. The file is cleaned up after the result is written.
+
 ## Step 3 — quick system checks (no agent)
 \`call_remote("scripts/mac_health.sh")\` · \`mac_ram.sh\` · \`mac_disk.sh\` · \`mac_top.sh\` · \`mac_network.sh\` · \`port_check.sh\` · \`docker_ps.sh\` · \`pkg_outdated.sh\` · \`git_status.sh <path>\`
 

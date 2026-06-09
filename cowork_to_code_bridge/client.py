@@ -183,6 +183,7 @@ def call_remote_streaming(
     bridge_root: Path | str | None = None,
     idempotency_key: str | None = None,
     on_progress=None,
+    on_status=None,
     plan: str | None = None,
     permission_mode: str | None = None,
 ) -> dict[str, Any]:
@@ -196,6 +197,11 @@ def call_remote_streaming(
 
     on_progress: optional callable taking the newly-appended text (str). If
     None, new output is printed to stdout as it arrives.
+
+    on_status: optional callable taking a status dict updated every ~2s:
+        {"elapsed_s": int, "last_line": str, "state": "running"|"done"|"error"}
+    Use this to render a spinner or status line without parsing raw log output.
+    on_progress and on_status are independent — use either or both.
     """
     root = Path(bridge_root) if bridge_root else _resolve_bridge_root()
     queue = root / "queue"
@@ -233,8 +239,10 @@ def call_remote_streaming(
 
     result_file = results / f"{cmd_id}.json"
     progress_file = progress / f"{cmd_id}.log"
+    status_file = progress / f"{cmd_id}.status.json"
     emit = on_progress or (lambda chunk: print(chunk, end="", flush=True))
     seen = 0
+    last_status_mtime: float = 0
     deadline = time.time() + timeout + 5
     while time.time() < deadline:
         # Stream any new progress output.
@@ -246,6 +254,17 @@ def call_remote_streaming(
                     seen = len(data)
         except OSError:
             pass
+        # Poll structured status file for on_status callback.
+        if on_status:
+            try:
+                if status_file.exists():
+                    mtime = status_file.stat().st_mtime
+                    if mtime != last_status_mtime:
+                        status = json.loads(status_file.read_text())
+                        on_status(status)
+                        last_status_mtime = mtime
+            except (OSError, json.JSONDecodeError):
+                pass
         # Check for the final result.
         if result_file.exists():
             try:

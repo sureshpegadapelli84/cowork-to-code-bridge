@@ -143,7 +143,7 @@ def call_remote(
 
 def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
                           cwd=None, env=None, bridge_root=None,
-                          idempotency_key=None, on_progress=None,
+                          idempotency_key=None, on_progress=None, on_status=None,
                           plan=None, permission_mode=None) -> dict[str, Any]:
     """Like call_remote, but streams live output while the task runs.
 
@@ -151,6 +151,11 @@ def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
     calls on_progress(new_text) for each new chunk (or prints it if on_progress
     is None). Use for long tasks (builds, test runs) so they're not blind.
     Returns the same final result dict as call_remote.
+
+    on_status: optional callable taking a status dict updated every ~2s:
+        {"elapsed_s": int, "last_line": str, "state": "running"|"done"|"error"}
+    Use this to render a spinner or status line without parsing raw log output.
+    on_progress and on_status are independent — use either or both.
     """
     root = Path(bridge_root) if bridge_root else _resolve_bridge_root()
     queue = root / "queue"; results = root / "results"; progress = root / "progress"
@@ -170,8 +175,10 @@ def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
     tmp.write_text(json.dumps(payload)); tmp.rename(cmd_file)
     result_file = results / f"{cmd_id}.json"
     progress_file = progress / f"{cmd_id}.log"
+    status_file = progress / f"{cmd_id}.status.json"
     emit = on_progress or (lambda chunk: print(chunk, end="", flush=True))
     seen = 0
+    last_status_mtime: float = 0
     deadline = time.time() + timeout + 5
     while time.time() < deadline:
         try:
@@ -181,6 +188,16 @@ def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
                     emit(data[seen:]); seen = len(data)
         except OSError:
             pass
+        if on_status:
+            try:
+                if status_file.exists():
+                    mtime = status_file.stat().st_mtime
+                    if mtime != last_status_mtime:
+                        status = json.loads(status_file.read_text())
+                        on_status(status)
+                        last_status_mtime = mtime
+            except (OSError, json.JSONDecodeError):
+                pass
         if result_file.exists():
             try:
                 return json.loads(result_file.read_text())

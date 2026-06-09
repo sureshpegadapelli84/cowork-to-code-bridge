@@ -278,8 +278,14 @@ def _drain_stale_queue(terminal: dict[str, str]) -> None:
 
 
 def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
-                   timeout: int, progress_file: Path) -> dict[str, Any]:
+                   timeout: int, progress_file: Path,
+                   status_interval: float = 2.0) -> dict[str, Any]:
     """Run a subprocess, teeing stdout+stderr to progress_file line-by-line.
+
+    Also writes progress/<id>.status.json every ~status_interval seconds so
+    Cowork can display a live status ticker (elapsed time, last output line,
+    state) without parsing the raw log stream. The file is written atomically
+    (tmp + rename) and finalized with state "done" or "error" on exit.
 
     Returns the same result dict shape as the old subprocess.run path:
       {exit_code, stdout, stderr} on success/failure,
@@ -291,20 +297,58 @@ def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
     """
     out_buf: list[str] = []
     err_buf: list[str] = []
+    # Shared slot for the last non-empty output line, updated by _tee threads
+    # and read by the status-writer thread. Using a list so inner functions can
+    # rebind the value without needing `nonlocal` (safe for concurrent reads
+    # since GIL protects single-item list assignment).
+    last_line: list[str] = [""]
+    start_ts = time.time()
+    # Derive the status file from the progress file: foo.log → foo.status.json
+    status_file = progress_file.parent / (progress_file.stem + ".status.json")
+
     # Truncate/create the progress file at start.
     with contextlib.suppress(OSError):
         progress_file.write_text("")
+
+    def _write_status_atomic(state: str, exit_code: int | None = None) -> None:
+        """Atomically overwrite status_file with current progress snapshot."""
+        payload: dict[str, Any] = {
+            "elapsed_s": int(time.time() - start_ts),
+            "last_line": last_line[0],
+            "state": state,
+        }
+        if exit_code is not None:
+            payload["exit_code"] = exit_code
+        tmp = status_file.parent / (status_file.name + ".tmp")
+        with contextlib.suppress(OSError):
+            tmp.write_text(json.dumps(payload))
+            tmp.rename(status_file)
 
     def _tee(stream, buf, tag):
         # Read line-by-line; append to in-memory buffer AND the progress file.
         try:
             for line in iter(stream.readline, ""):
                 buf.append(line)
+                stripped = line.rstrip()
+                if stripped:
+                    last_line[0] = stripped
                 with contextlib.suppress(OSError), progress_file.open("a") as pf:
                     pf.write(line if tag == "out" else f"[stderr] {line}")
         finally:
             with contextlib.suppress(Exception):
                 stream.close()
+
+    # Status-writer thread: wakes every status_interval seconds via Event.wait()
+    # so it exits immediately when _status_stop.set() is called rather than
+    # sleeping a full interval.
+    _status_stop = threading.Event()
+
+    def _write_status_loop() -> None:
+        while not _status_stop.wait(timeout=status_interval):
+            _write_status_atomic(state="running")
+
+    t_status = threading.Thread(target=_write_status_loop, daemon=True)
+    t_status.start()
 
     try:
         proc = subprocess.Popen(
@@ -312,6 +356,9 @@ def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
             text=True, cwd=cwd, env=env, bufsize=1,
         )
     except Exception as e:
+        _status_stop.set()
+        t_status.join(timeout=0.5)
+        _write_status_atomic(state="error", exit_code=-3)
         return {"exit_code": -3, "error": str(e)}
 
     t_out = threading.Thread(target=_tee, args=(proc.stdout, out_buf, "out"), daemon=True)
@@ -326,6 +373,9 @@ def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
         proc.wait()
         t_out.join(timeout=2)
         t_err.join(timeout=2)
+        _status_stop.set()
+        t_status.join(timeout=0.5)
+        _write_status_atomic(state="error", exit_code=-2)
         return {
             "exit_code": -2,
             "error": f"timeout after {timeout}s",
@@ -335,6 +385,12 @@ def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
 
     t_out.join(timeout=5)
     t_err.join(timeout=5)
+    # Stop periodic writer first, then write the authoritative final state so
+    # a racing status-loop write can't overwrite "done" with "running".
+    _status_stop.set()
+    t_status.join(timeout=0.5)
+    final_state = "done" if proc.returncode == 0 else "error"
+    _write_status_atomic(state=final_state, exit_code=proc.returncode)
     return {
         "exit_code": proc.returncode,
         "stdout": "".join(out_buf)[-65536:],
@@ -569,8 +625,9 @@ def run_one(cmd_path: Path, token_required: str | None,
     if idem_key:
         idem_cache.setdefault(idem_key, result)
     _inflight_clear(cmd_id)
-    # The result file is now authoritative; drop the live progress file.
+    # The result file is now authoritative; drop the live progress files.
     (PROGRESS / f"{cmd_id}.log").unlink(missing_ok=True)
+    (PROGRESS / f"{cmd_id}.status.json").unlink(missing_ok=True)
     cmd_path.rename(PROCESSED / cmd_path.name)
     log(f"  ✓ {cmd_id}: exit={result['exit_code']}")
 
