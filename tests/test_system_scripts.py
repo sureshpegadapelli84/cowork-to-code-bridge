@@ -123,6 +123,162 @@ def test_example_system_scripts_match_install_templates(script_name: str, marker
     assert example_path.read_text() == _extract_script(script_name, marker)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# process_kill.sh tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture()
+def process_kill_script(tmp_path: Path) -> Path:
+    """Extract process_kill.sh from install.sh into tmp dir and make executable."""
+    script_path = tmp_path / "process_kill.sh"
+    script_path.write_text(_extract_script("process_kill.sh", "PK"))
+    script_path.chmod(0o755)
+    return script_path
+
+
+def _fake_kill(tmp_path: Path, behaviour: str) -> Path:
+    """Create a fake kill binary.
+
+    behaviour:
+      'success'  — exits 0 for both -0 (exists check) and -TERM
+      'no_proc'  — exits 1 for -0 (process not found)
+    """
+    kill = tmp_path / "fake_kill"
+    if behaviour == "success":
+        kill.write_text("#!/usr/bin/env bash\nexit 0\n")
+    else:  # no_proc
+        kill.write_text("#!/usr/bin/env bash\nexit 1\n")
+    kill.chmod(0o755)
+    return kill
+
+
+def _fake_pgrep(tmp_path: Path, pids: list[int] | None) -> Path:
+    """Create a fake pgrep that returns given PIDs (one per line), or exits 1 if None."""
+    pgrep = tmp_path / "fake_pgrep"
+    if pids is None:
+        pgrep.write_text("#!/usr/bin/env bash\nexit 1\n")
+    else:
+        output = "\\n".join(str(p) for p in pids)
+        pgrep.write_text(f'#!/usr/bin/env bash\nprintf "{output}\\n"\nexit 0\n')
+    pgrep.chmod(0o755)
+    return pgrep
+
+
+def _run_pk(script: Path, args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
+    merged = {**os.environ, **(env or {})}
+    return subprocess.run(
+        [str(script), *args],
+        capture_output=True, text=True, check=False, env=merged,
+    )
+
+
+# ── Safety guards ─────────────────────────────────────────────────────────────
+
+def test_process_kill_refuses_pid_le_10(process_kill_script: Path, tmp_path: Path) -> None:
+    fake_kill = _fake_kill(tmp_path, "success")
+    result = _run_pk(process_kill_script, ["5"], {"BRIDGE_KILL_CMD": str(fake_kill)})
+    assert result.returncode != 0
+    assert "10" in result.stderr
+
+
+def test_process_kill_refuses_pid_1(process_kill_script: Path, tmp_path: Path) -> None:
+    fake_kill = _fake_kill(tmp_path, "success")
+    result = _run_pk(process_kill_script, ["1"], {"BRIDGE_KILL_CMD": str(fake_kill)})
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("name", ["launchd", "kernel_task", "systemd", "init", "kernel", "kthreadd"])
+def test_process_kill_refuses_protected_names(
+    process_kill_script: Path, tmp_path: Path, name: str
+) -> None:
+    fake_pgrep = _fake_pgrep(tmp_path, [9999])
+    fake_kill = _fake_kill(tmp_path, "success")
+    result = _run_pk(
+        process_kill_script, [name],
+        {"BRIDGE_PGREP_CMD": str(fake_pgrep), "BRIDGE_KILL_CMD": str(fake_kill)},
+    )
+    assert result.returncode != 0
+    assert "refusing" in result.stderr.lower() or "protected" in result.stderr.lower()
+
+
+def test_process_kill_refuses_nonexistent_pid(process_kill_script: Path, tmp_path: Path) -> None:
+    fake_kill = _fake_kill(tmp_path, "no_proc")
+    result = _run_pk(process_kill_script, ["9999"], {"BRIDGE_KILL_CMD": str(fake_kill)})
+    assert result.returncode != 0
+    assert "no process" in result.stderr.lower()
+
+
+# ── Name-path behaviour ───────────────────────────────────────────────────────
+
+def test_process_kill_name_not_found(process_kill_script: Path, tmp_path: Path) -> None:
+    fake_pgrep = _fake_pgrep(tmp_path, None)
+    result = _run_pk(process_kill_script, ["myapp"], {"BRIDGE_PGREP_CMD": str(fake_pgrep)})
+    assert result.returncode != 0
+    assert "no process" in result.stderr.lower()
+
+
+def test_process_kill_multiple_matches_no_all_flag(
+    process_kill_script: Path, tmp_path: Path
+) -> None:
+    fake_pgrep = _fake_pgrep(tmp_path, [1234, 5678])
+    fake_kill = _fake_kill(tmp_path, "success")
+    result = _run_pk(
+        process_kill_script, ["myapp"],
+        {"BRIDGE_PGREP_CMD": str(fake_pgrep), "BRIDGE_KILL_CMD": str(fake_kill)},
+    )
+    assert result.returncode != 0
+    assert "--all" in result.stderr
+
+
+def test_process_kill_multiple_matches_with_all_flag(
+    process_kill_script: Path, tmp_path: Path
+) -> None:
+    # First pgrep call returns 2 PIDs; second (post-kill check) returns empty.
+    stateful_pgrep = tmp_path / "fake_pgrep_stateful"
+    stateful_pgrep.write_text(
+        '#!/usr/bin/env bash\n'
+        'STATE="$(dirname "$0")/.called"\n'
+        'if [[ ! -f "$STATE" ]]; then touch "$STATE"; printf "1234\\n5678\\n"; exit 0; fi\n'
+        'exit 1\n'
+    )
+    stateful_pgrep.chmod(0o755)
+    fake_kill = _fake_kill(tmp_path, "success")
+    result = _run_pk(
+        process_kill_script, ["myapp", "--all"],
+        {"BRIDGE_PGREP_CMD": str(stateful_pgrep), "BRIDGE_KILL_CMD": str(fake_kill)},
+    )
+    assert result.returncode == 0
+    assert "✓" in result.stdout or "terminated" in result.stdout.lower()
+
+
+def test_process_kill_single_match_succeeds(
+    process_kill_script: Path, tmp_path: Path
+) -> None:
+    stateful_pgrep = tmp_path / "fake_pgrep_single"
+    stateful_pgrep.write_text(
+        '#!/usr/bin/env bash\n'
+        'STATE="$(dirname "$0")/.called"\n'
+        'if [[ ! -f "$STATE" ]]; then touch "$STATE"; printf "9999\\n"; exit 0; fi\n'
+        'exit 1\n'
+    )
+    stateful_pgrep.chmod(0o755)
+    fake_kill = _fake_kill(tmp_path, "success")
+    result = _run_pk(
+        process_kill_script, ["myapp"],
+        {"BRIDGE_PGREP_CMD": str(stateful_pgrep), "BRIDGE_KILL_CMD": str(fake_kill)},
+    )
+    assert result.returncode == 0
+    assert "✓" in result.stdout or "terminated" in result.stdout.lower()
+
+
+# ── Template sync ─────────────────────────────────────────────────────────────
+
+def test_process_kill_example_matches_install_template() -> None:
+    """examples/allowed_scripts/process_kill.sh must be identical to the install.sh heredoc."""
+    example = REPO_ROOT / "examples" / "allowed_scripts" / "process_kill.sh"
+    assert example.read_text() == _extract_script("process_kill.sh", "PK")
+
+
 # ── newer utility scripts (list_scripts, env_check, disk_hogs, open_browser) ──
 
 NEW_SCRIPTS = [

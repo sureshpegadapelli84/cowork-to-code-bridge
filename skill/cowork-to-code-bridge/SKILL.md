@@ -109,6 +109,7 @@ For simple, fast system queries, call a ready-made script directly:
 | "what scripts can you run on my machine?" | `call_remote("scripts/list_scripts.sh")` |
 | "show my machine's env / PATH / claude CLI" | `call_remote("scripts/env_check.sh")` |
 | "what's eating disk in ~/Downloads?" | `call_remote("scripts/disk_hogs.sh", args=["~/Downloads", "15"])` |
+| "kill process rails" / "stop PID 1234" | `call_remote("scripts/process_kill.sh", args=["rails"])` or `args=["1234"]` |
 | "open localhost:3000 in my browser" | `call_remote("scripts/open_browser.sh", args=["http://localhost:3000"])` |
 
 **Tip:** if you're unsure what's available, call `list_scripts.sh` first — it
