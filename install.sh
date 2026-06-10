@@ -464,11 +464,38 @@ MSG
 fi
 log "using claude at: $CLAUDE_BIN"
 cd "$WORKDIR" || { log "cannot cd to $WORKDIR"; exit 1; }
-# CLAUDE_FLAGS (env): restrict Cowork-originated tasks. Examples:
-#   CLAUDE_FLAGS="--permission-mode plan"                   # plan-only
+# CLAUDE_FLAGS (env): owner-global flags for Cowork-originated tasks. Examples:
+#   CLAUDE_FLAGS="--permission-mode plan"                   # plan-only globally
 #   CLAUDE_FLAGS="--allowedTools Edit,Write,Read,Glob,Grep" # edits only, no shell
-# Unset = full agent. The prompt + output format are always appended.
+# Unset = full agent. Per-task TASK_PERMISSION_MODE (below) overrides --permission-mode.
 read -r -a EXTRA_FLAGS <<< "${CLAUDE_FLAGS:-}"
+
+# ── Per-task permission mode ──────────────────────────────────────────────────
+# TASK_PERMISSION_MODE is injected by the daemon after validating the caller's
+# requested mode against the owner's BRIDGE_PERMISSION_CEILING. If set, it
+# replaces any --permission-mode that may have been in CLAUDE_FLAGS so the
+# per-task request takes effect without the caller being able to exceed the
+# ceiling.
+PERMISSION_FLAGS=()
+if [[ -n "${TASK_PERMISSION_MODE:-}" ]]; then
+  # Strip any --permission-mode from EXTRA_FLAGS so we don't pass it twice.
+  FILTERED_FLAGS=()
+  skip_next=0
+  for flag in "${EXTRA_FLAGS[@]}"; do
+    if [[ "$skip_next" -eq 1 ]]; then
+      skip_next=0; continue
+    fi
+    if [[ "$flag" == "--permission-mode" ]]; then
+      skip_next=1; continue   # drop the flag and its value
+    fi
+    if [[ "$flag" == --permission-mode=* ]]; then
+      continue                # drop --permission-mode=value combined form
+    fi
+    FILTERED_FLAGS+=("$flag")
+  done
+  EXTRA_FLAGS=("${FILTERED_FLAGS[@]}")
+  PERMISSION_FLAGS=(--permission-mode "$TASK_PERMISSION_MODE")
+fi
 
 # ── Budget cap ────────────────────────────────────────────────────────────────
 # MAX_BUDGET_USD: per-task spend ceiling passed in by the client.
@@ -492,7 +519,7 @@ elif [[ -n "$OWNER_CEILING" ]]; then
   BUDGET_FLAGS=(--max-budget-usd "$OWNER_CEILING")
 fi
 
-exec "$CLAUDE_BIN" "${EXTRA_FLAGS[@]}" "${BUDGET_FLAGS[@]}" -p "$TASK" --output-format text
+exec "$CLAUDE_BIN" "${EXTRA_FLAGS[@]}" "${PERMISSION_FLAGS[@]}" "${BUDGET_FLAGS[@]}" -p "$TASK" --output-format text
 RUNCLAUDE
 chmod +x "$BRIDGE_ROOT/scripts/run_claude.sh"
 
@@ -1189,6 +1216,12 @@ print(r["exit_code"]); print(r["stdout"])
 \`\`\`
 Always pass a unique \`idempotency_key\` — Claude Code tasks have side effects, so a
 retry must not run twice.
+
+### Per-task permission mode
+Pass \`permission_mode="plan"\` (read-only), \`"acceptEdits"\` (edits, no shell),
+or \`"default"\` (full agent) to scope each task without changing global CLAUDE_FLAGS.
+Owner sets \`BRIDGE_PERMISSION_CEILING\` to hard-cap what Cowork may request.
+\`"bypassPermissions"\` is never accepted per-task.
 
 ### Per-task cost cap
 Pass \`max_budget_usd=2.00\` to stop the agent when that amount is spent.

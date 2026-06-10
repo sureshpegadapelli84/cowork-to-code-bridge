@@ -75,6 +75,7 @@ def call_remote(
     idempotency_key: str | None = None,
     plan: str | None = None,
     max_budget_usd: float | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     """Submit a script invocation to the Mac daemon and wait for its result.
 
@@ -88,6 +89,9 @@ def call_remote(
       - `max_budget_usd` sets a per-task spend ceiling for run_claude.sh calls.
         The owner's BRIDGE_MAX_BUDGET_USD is a hard upper limit; if both are set
         the daemon uses min(max_budget_usd, BRIDGE_MAX_BUDGET_USD).
+      - `permission_mode` sets per-task Claude Code permission scope: "plan"
+        (read-only), "acceptEdits" (edits, no shell), or "default" (full agent).
+        Capped by owner's BRIDGE_PERMISSION_CEILING; unset = use CLAUDE_FLAGS.
     Raises TimeoutError if the daemon doesn't respond within timeout + 5s.
     """
     root = Path(bridge_root) if bridge_root else _resolve_bridge_root()
@@ -114,6 +118,8 @@ def call_remote(
         payload["plan"] = plan
     if max_budget_usd is not None:
         payload["max_budget_usd"] = float(max_budget_usd)
+    if permission_mode is not None:
+        payload["permission_mode"] = str(permission_mode)
 
     token = _load_token(root)
     if token:
@@ -146,7 +152,8 @@ def call_remote(
 def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
                           cwd=None, env=None, bridge_root=None,
                           idempotency_key=None, on_progress=None, on_status=None,
-                          plan=None, max_budget_usd=None) -> dict[str, Any]:
+                          plan=None, max_budget_usd=None,
+                          permission_mode=None) -> dict[str, Any]:
     """Like call_remote, but streams live output while the task runs.
 
     The daemon tees the script's output to progress/<id>.log; this polls it and
@@ -174,6 +181,7 @@ def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
     if idempotency_key: payload["idempotency_key"] = idempotency_key
     if plan is not None: payload["plan"] = plan
     if max_budget_usd is not None: payload["max_budget_usd"] = float(max_budget_usd)
+    if permission_mode is not None: payload["permission_mode"] = str(permission_mode)
     token = _load_token(root)
     if token: payload["token"] = token
     cmd_file = queue / f"{cmd_id}.json"

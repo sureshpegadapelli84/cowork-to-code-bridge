@@ -70,6 +70,39 @@ print(r["stdout"])   # what the local Claude Code agent did + reported
 can edit/commit/push, so if the connection drops and you retry, the key makes the
 daemon return the cached result instead of running the agent twice.
 
+### Per-task permission mode (`permission_mode`)
+
+Different tasks need different trust levels. Pass `permission_mode` to scope each
+call without changing the global `CLAUDE_FLAGS`:
+
+```python
+# Read-only — safe for summarise / explain / review tasks
+r = call_remote(
+    "scripts/run_claude.sh",
+    args=["Summarise the open PRs in this repo", "/path/to/repo"],
+    permission_mode="plan",           # no file edits, no shell
+    idempotency_key="summarise-prs-1",
+)
+
+# Edits allowed — for refactor / fix / scaffold tasks
+r = call_remote(
+    "scripts/run_claude.sh",
+    args=["Refactor the auth module and add tests", "/path/to/repo"],
+    permission_mode="acceptEdits",    # file edits yes, shell prompts
+    idempotency_key="refactor-auth-1",
+)
+```
+
+Valid values (from most to least restrictive): `"plan"`, `"acceptEdits"`, `"default"`.
+`"bypassPermissions"` is intentionally excluded — it can only be set by the Mac owner
+via `CLAUDE_FLAGS`, never by a per-task request.
+
+The Mac owner can set `BRIDGE_PERMISSION_CEILING` in their launchd/systemd env to
+hard-limit what modes Cowork may request. If the owner sets `acceptEdits` and a task
+requests `default`, the effective mode is `acceptEdits`. Cowork can only request
+modes **at or below** the ceiling — it can never widen permissions beyond what the
+owner allows.
+
 ### Per-task cost cap (`max_budget_usd`)
 
 Long Claude Code tasks can drift. Pass `max_budget_usd` to set a hard spend

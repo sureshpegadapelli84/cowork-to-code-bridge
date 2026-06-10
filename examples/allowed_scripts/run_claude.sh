@@ -110,14 +110,36 @@ fi
 log "using claude at: $CLAUDE_BIN"
 cd "$WORKDIR" || { log "cannot cd to $WORKDIR"; exit 1; }
 
-# CLAUDE_FLAGS (env): set the trust/permission scope for Cowork-originated tasks.
-# If you export CLAUDE_FLAGS in the environment (e.g. in the launchd/systemd unit
-# or your shell profile), those flags are passed to Claude Code. Examples:
-#   CLAUDE_FLAGS="--permission-mode plan"                  # plan-only, no edits/exec
+# CLAUDE_FLAGS (env): owner-global flags for Cowork-originated tasks. Examples:
+#   CLAUDE_FLAGS="--permission-mode plan"                  # plan-only globally
 #   CLAUDE_FLAGS="--allowedTools Edit,Write,Read,Glob,Grep" # edits only, no shell
-# Unset/empty = the default (full agent). The task prompt + output format are
-# always appended and can't be overridden.
+# Unset/empty = full agent. Per-task TASK_PERMISSION_MODE (below) overrides
+# --permission-mode without allowing the caller to exceed the owner ceiling.
 read -r -a EXTRA_FLAGS <<< "${CLAUDE_FLAGS:-}"
+
+# ── Per-task permission mode ──────────────────────────────────────────────────
+# TASK_PERMISSION_MODE: injected by daemon after validating the caller's
+# requested mode against BRIDGE_PERMISSION_CEILING. Replaces any --permission-mode
+# in CLAUDE_FLAGS so the per-task mode takes effect cleanly.
+PERMISSION_FLAGS=()
+if [[ -n "${TASK_PERMISSION_MODE:-}" ]]; then
+  FILTERED_FLAGS=()
+  skip_next=0
+  for flag in "${EXTRA_FLAGS[@]}"; do
+    if [[ "$skip_next" -eq 1 ]]; then
+      skip_next=0; continue
+    fi
+    if [[ "$flag" == "--permission-mode" ]]; then
+      skip_next=1; continue
+    fi
+    if [[ "$flag" == --permission-mode=* ]]; then
+      continue
+    fi
+    FILTERED_FLAGS+=("$flag")
+  done
+  EXTRA_FLAGS=("${FILTERED_FLAGS[@]}")
+  PERMISSION_FLAGS=(--permission-mode "$TASK_PERMISSION_MODE")
+fi
 
 # ── Budget cap ────────────────────────────────────────────────────────────────
 # MAX_BUDGET_USD: per-task ceiling set by the caller (injected via daemon env).
@@ -137,4 +159,4 @@ elif [[ -n "$OWNER_CEILING" ]]; then
   BUDGET_FLAGS=(--max-budget-usd "$OWNER_CEILING")
 fi
 
-exec "$CLAUDE_BIN" "${EXTRA_FLAGS[@]}" "${BUDGET_FLAGS[@]}" -p "$TASK" --output-format text
+exec "$CLAUDE_BIN" "${EXTRA_FLAGS[@]}" "${PERMISSION_FLAGS[@]}" "${BUDGET_FLAGS[@]}" -p "$TASK" --output-format text

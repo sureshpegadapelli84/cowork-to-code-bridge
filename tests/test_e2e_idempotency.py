@@ -310,6 +310,108 @@ def test_budget_caller_cannot_override_owner_ceiling(tmp_path, monkeypatch):
     assert "BRIDGE_MAX_BUDGET_USD=5.0" in res["stdout"]
 
 
+# ─── permission_mode tests ────────────────────────────────────────────────────
+
+def _perm_bridge(tmp_path, monkeypatch, ceiling=None):
+    """Return a bridge fixture with an optional BRIDGE_PERMISSION_CEILING."""
+    monkeypatch.setenv("BRIDGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("BRIDGE_TOKEN", "test-token")
+    monkeypatch.delenv("BRIDGE_MAX_BUDGET_USD", raising=False)
+    if ceiling is not None:
+        monkeypatch.setenv("BRIDGE_PERMISSION_CEILING", ceiling)
+    else:
+        monkeypatch.delenv("BRIDGE_PERMISSION_CEILING", raising=False)
+    import cowork_to_code_bridge.daemon as d
+    importlib.reload(d)
+    for sub in (d.QUEUE, d.RESULTS, d.PROCESSED, d.INFLIGHT, d.PROGRESS, d.SCRIPTS_DIR):
+        sub.mkdir(parents=True, exist_ok=True)
+    # Script that dumps env so we can inspect TASK_PERMISSION_MODE.
+    script = d.SCRIPTS_DIR / "dump_env.sh"
+    script.write_text("#!/bin/bash\nenv\n")
+    script.chmod(0o755)
+    return d
+
+
+def test_permission_mode_injected_into_env(tmp_path, monkeypatch):
+    """permission_mode in the command payload is forwarded as TASK_PERMISSION_MODE."""
+    d = _perm_bridge(tmp_path, monkeypatch)
+    p = {"id": "pm1", "script": "scripts/dump_env.sh", "args": [],
+         "token": "test-token", "timeout": 5, "permission_mode": "plan"}
+    (d.QUEUE / "pm1.json").write_text(json.dumps(p))
+    d.run_one(d.QUEUE / "pm1.json", "test-token", {}, {})
+    res = json.loads((d.RESULTS / "pm1.json").read_text())
+    assert res["exit_code"] == 0
+    assert "TASK_PERMISSION_MODE=plan" in res["stdout"]
+
+
+def test_permission_mode_capped_by_ceiling(tmp_path, monkeypatch):
+    """Requested mode more permissive than ceiling is capped to ceiling."""
+    d = _perm_bridge(tmp_path, monkeypatch, ceiling="acceptEdits")
+    p = {"id": "pm2", "script": "scripts/dump_env.sh", "args": [],
+         "token": "test-token", "timeout": 5, "permission_mode": "default"}
+    (d.QUEUE / "pm2.json").write_text(json.dumps(p))
+    d.run_one(d.QUEUE / "pm2.json", "test-token", {}, {})
+    res = json.loads((d.RESULTS / "pm2.json").read_text())
+    assert res["exit_code"] == 0
+    # "default" is more permissive than "acceptEdits" — must be capped.
+    assert "TASK_PERMISSION_MODE=acceptEdits" in res["stdout"]
+    assert "TASK_PERMISSION_MODE=default" not in res["stdout"]
+
+
+def test_permission_mode_within_ceiling_not_capped(tmp_path, monkeypatch):
+    """Requested mode more restrictive than ceiling passes through unchanged."""
+    d = _perm_bridge(tmp_path, monkeypatch, ceiling="default")
+    p = {"id": "pm3", "script": "scripts/dump_env.sh", "args": [],
+         "token": "test-token", "timeout": 5, "permission_mode": "plan"}
+    (d.QUEUE / "pm3.json").write_text(json.dumps(p))
+    d.run_one(d.QUEUE / "pm3.json", "test-token", {}, {})
+    res = json.loads((d.RESULTS / "pm3.json").read_text())
+    assert res["exit_code"] == 0
+    # "plan" is more restrictive than "default" ceiling — must not be widened.
+    assert "TASK_PERMISSION_MODE=plan" in res["stdout"]
+
+
+def test_permission_mode_invalid_value_rejected(tmp_path, monkeypatch):
+    """An unknown permission_mode value returns exit_code=-1 and no subprocess."""
+    d = _perm_bridge(tmp_path, monkeypatch)
+    p = {"id": "pm4", "script": "scripts/dump_env.sh", "args": [],
+         "token": "test-token", "timeout": 5,
+         "permission_mode": "bypassPermissions"}  # not in allowed list
+    (d.QUEUE / "pm4.json").write_text(json.dumps(p))
+    d.run_one(d.QUEUE / "pm4.json", "test-token", {}, {})
+    res = json.loads((d.RESULTS / "pm4.json").read_text())
+    assert res["exit_code"] == -1
+    assert "bypassPermissions" in res["error"]
+
+
+def test_permission_mode_absent_leaves_task_permission_mode_unset(tmp_path, monkeypatch):
+    """If permission_mode is not in the payload, TASK_PERMISSION_MODE must NOT appear."""
+    d = _perm_bridge(tmp_path, monkeypatch)
+    p = {"id": "pm5", "script": "scripts/dump_env.sh", "args": [],
+         "token": "test-token", "timeout": 5}
+    (d.QUEUE / "pm5.json").write_text(json.dumps(p))
+    d.run_one(d.QUEUE / "pm5.json", "test-token", {}, {})
+    res = json.loads((d.RESULTS / "pm5.json").read_text())
+    assert res["exit_code"] == 0
+    assert "TASK_PERMISSION_MODE" not in res["stdout"]
+
+
+def test_permission_mode_caller_cannot_inject_via_env_dict(tmp_path, monkeypatch):
+    """Caller cannot set TASK_PERMISSION_MODE via the env dict — it's protected."""
+    d = _perm_bridge(tmp_path, monkeypatch, ceiling="plan")
+    p = {"id": "pm6", "script": "scripts/dump_env.sh", "args": [],
+         "token": "test-token", "timeout": 5,
+         "env": {"TASK_PERMISSION_MODE": "default"}}  # try to bypass ceiling
+    (d.QUEUE / "pm6.json").write_text(json.dumps(p))
+    d.run_one(d.QUEUE / "pm6.json", "test-token", {}, {})
+    res = json.loads((d.RESULTS / "pm6.json").read_text())
+    assert res["exit_code"] == 0
+    # The env-dict injection must have been blocked — "default" must not appear.
+    assert "TASK_PERMISSION_MODE=default" not in res["stdout"]
+    # TASK_PERMISSION_MODE should not be set at all (no permission_mode in payload).
+    assert "TASK_PERMISSION_MODE" not in res["stdout"]
+
+
 def test_e2e_oversized_command_rejected(bridge):
     """A command file larger than MAX_CMD_BYTES is rejected, not slurped."""
     d, _ = bridge

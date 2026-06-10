@@ -77,6 +77,7 @@ def call_remote(
     idempotency_key: str | None = None,
     plan: str | None = None,
     max_budget_usd: float | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     """Submit a script invocation to the Mac daemon and wait for its result.
 
@@ -107,6 +108,14 @@ def call_remote(
             can set ``BRIDGE_MAX_BUDGET_USD`` as a hard global ceiling; if
             both are present the effective limit is min(max_budget_usd,
             BRIDGE_MAX_BUDGET_USD).  Ignored for non-claude scripts.
+        permission_mode: Optional per-task Claude Code permission mode.
+            One of ``"plan"`` (read-only), ``"acceptEdits"`` (edits, no
+            shell), or ``"default"`` (full agent).  The owner's
+            ``BRIDGE_PERMISSION_CEILING`` caps this — if the owner set
+            ``"acceptEdits"`` and you request ``"default"``, the effective
+            mode is ``"acceptEdits"``.  If unset, ``CLAUDE_FLAGS`` from the
+            owner's environment applies unchanged.  Ignored for non-claude
+            scripts.
 
     Returns:
         Dict with keys: id, exit_code, stdout, stderr, ts_completed.
@@ -142,6 +151,8 @@ def call_remote(
         payload["plan"] = plan
     if max_budget_usd is not None:
         payload["max_budget_usd"] = float(max_budget_usd)
+    if permission_mode is not None:
+        payload["permission_mode"] = str(permission_mode)
 
     token = _load_token(root)
     if token:
@@ -185,6 +196,7 @@ def call_remote_streaming(
     on_status=None,
     plan: str | None = None,
     max_budget_usd: float | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     """Like call_remote, but streams live output while the task runs.
 
@@ -231,6 +243,8 @@ def call_remote_streaming(
         payload["plan"] = plan
     if max_budget_usd is not None:
         payload["max_budget_usd"] = float(max_budget_usd)
+    if permission_mode is not None:
+        payload["permission_mode"] = str(permission_mode)
     token = _load_token(root)
     if token:
         payload["token"] = token

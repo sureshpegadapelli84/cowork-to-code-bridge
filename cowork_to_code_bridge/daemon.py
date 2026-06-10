@@ -70,11 +70,26 @@ JOURNAL = BRIDGE_ROOT / "journal.log"
 POLL_SEC = float(os.environ.get("BRIDGE_POLL_SEC", "1.0"))
 MAX_TIMEOUT_SEC = int(os.environ.get("BRIDGE_MAX_TIMEOUT", "600"))
 # Owner-set per-task budget ceiling for run_claude.sh calls.
-# If set, daemon injects MAX_BUDGET_USD into the script env and run_claude.sh
-# passes it to `claude --max-budget-usd`.  The script also reads
-# BRIDGE_MAX_BUDGET_USD so the owner ceiling can never be exceeded regardless
-# of what the caller sends.
 _MAX_BUDGET_USD_STR: str | None = os.environ.get("BRIDGE_MAX_BUDGET_USD") or None
+
+# ── Permission-mode ceiling ───────────────────────────────────────────────────
+# Ordered from most restrictive (index 0) to least restrictive (highest index).
+# The caller may request any mode; the effective mode is min(requested, ceiling)
+# in this ordering. Modes not in this list are rejected outright.
+#
+# "default" = full agent with interactive permission prompts — NOT "bypassPermissions".
+# "bypassPermissions" is deliberately excluded from the allowable caller values
+# because it is the nuclear option; it can only be set by the owner globally via
+# CLAUDE_FLAGS, never via a per-task request.
+_PERMISSION_ORDER: list[str] = ["plan", "acceptEdits", "default"]
+_PERMISSION_CEILING: str | None = os.environ.get("BRIDGE_PERMISSION_CEILING") or None
+# Validate ceiling at startup so a misconfigured env fails loudly.
+if _PERMISSION_CEILING and _PERMISSION_CEILING not in _PERMISSION_ORDER:
+    raise SystemExit(
+        f"daemon: BRIDGE_PERMISSION_CEILING={_PERMISSION_CEILING!r} is not a valid "
+        f"permission mode. Choose from: {', '.join(_PERMISSION_ORDER)}"
+    )
+
 ALLOW_UNAUTH = os.environ.get("BRIDGE_ALLOW_UNAUTH") == "1"
 JOURNAL_WARN_BYTES = 10 * 1024 * 1024  # warn at 10 MB
 JOURNAL_ROTATE_BYTES = 50 * 1024 * 1024  # rotate at 50 MB (keep one .old)
@@ -533,7 +548,8 @@ def run_one(cmd_path: Path, token_required: str | None,
             env[k] = str(v)
         elif k.upper() in ("CLAUDE_FLAGS", "BRIDGE_TOKEN", "BRIDGE_ROOT",
                            "BRIDGE_ALLOW_UNAUTH", "BRIDGE_MAX_TIMEOUT",
-                           "BRIDGE_MAX_BUDGET_USD"):
+                           "BRIDGE_MAX_BUDGET_USD", "BRIDGE_PERMISSION_CEILING",
+                           "TASK_PERMISSION_MODE"):
             log(f"  ! blocked caller attempt to override protected env var: {k}")
         else:
             env[k] = str(v)       # non-security vars: caller wins (e.g. PYTHONPATH)
@@ -557,6 +573,52 @@ def run_one(cmd_path: Path, token_required: str | None,
     if _MAX_BUDGET_USD_STR:
         # Always forward the owner ceiling so run_claude.sh can enforce it.
         env["BRIDGE_MAX_BUDGET_USD"] = _MAX_BUDGET_USD_STR
+
+    # ── Per-task permission mode ──────────────────────────────────────────────
+    # The caller may request a specific permission mode (e.g. "plan", "acceptEdits").
+    # The daemon enforces: effective_mode = min(requested, owner_ceiling) where
+    # "min" means most restrictive in the _PERMISSION_ORDER list.
+    #
+    # Security invariants:
+    #   1. Requested mode must be in _PERMISSION_ORDER — "bypassPermissions" is
+    #      deliberately excluded so it can NEVER be requested per-task.
+    #   2. If the owner set BRIDGE_PERMISSION_CEILING, the effective mode is
+    #      whichever is MORE restrictive: requested or ceiling.
+    #   3. The effective mode is injected as TASK_PERMISSION_MODE into the env.
+    #      run_claude.sh reads it and passes --permission-mode <mode> to claude.
+    #   4. If no permission_mode is in the command, TASK_PERMISSION_MODE is NOT
+    #      set — run_claude.sh falls back to whatever CLAUDE_FLAGS already says
+    #      (full backward compatibility).
+    requested_mode = cmd.get("permission_mode")
+    if requested_mode is not None:
+        requested_mode = str(requested_mode).strip()
+        if requested_mode not in _PERMISSION_ORDER:
+            write_result(cmd_id, {
+                "exit_code": -1,
+                "error": (
+                    f"permission_mode={requested_mode!r} is not valid. "
+                    f"Allowed values: {', '.join(_PERMISSION_ORDER)}"
+                ),
+            })
+            log(f"  ✗ {cmd_id}: invalid permission_mode={requested_mode!r}")
+            _inflight_clear(cmd_id)
+            cmd_path.rename(PROCESSED / cmd_path.name)
+            return
+        # Apply owner ceiling: effective = most restrictive of (requested, ceiling).
+        if _PERMISSION_CEILING:
+            req_idx = _PERMISSION_ORDER.index(requested_mode)
+            ceil_idx = _PERMISSION_ORDER.index(_PERMISSION_CEILING)
+            effective_mode = _PERMISSION_ORDER[min(req_idx, ceil_idx)]
+            if effective_mode != requested_mode:
+                log(
+                    f"  ! {cmd_id}: permission_mode capped "
+                    f"{requested_mode!r} → {effective_mode!r} "
+                    f"(ceiling={_PERMISSION_CEILING!r})"
+                )
+        else:
+            effective_mode = requested_mode
+        env["TASK_PERMISSION_MODE"] = effective_mode
+        log(f"  · {cmd_id}: permission_mode={effective_mode!r}")
 
     # ─── in-flight marker + journal: started ──────────────────────────────────
     # Marker is written BEFORE subprocess.run. If we crash between this point
