@@ -76,6 +76,7 @@ def call_remote(
     bridge_root: Path | str | None = None,
     idempotency_key: str | None = None,
     plan: str | None = None,
+    max_budget_usd: float | None = None,
 ) -> dict[str, Any]:
     """Submit a script invocation to the Mac daemon and wait for its result.
 
@@ -101,6 +102,11 @@ def call_remote(
             The hook exits 0 to allow, 2 to reject (returning exit_code=-1
             with the hook's stderr as the error message). If the hook is
             absent the plan field is silently ignored.
+        max_budget_usd: Optional per-task spend ceiling passed to
+            ``run_claude.sh`` as ``--max-budget-usd``.  The daemon's owner
+            can set ``BRIDGE_MAX_BUDGET_USD`` as a hard global ceiling; if
+            both are present the effective limit is min(max_budget_usd,
+            BRIDGE_MAX_BUDGET_USD).  Ignored for non-claude scripts.
 
     Returns:
         Dict with keys: id, exit_code, stdout, stderr, ts_completed.
@@ -134,6 +140,8 @@ def call_remote(
         payload["idempotency_key"] = idempotency_key
     if plan is not None:
         payload["plan"] = plan
+    if max_budget_usd is not None:
+        payload["max_budget_usd"] = float(max_budget_usd)
 
     token = _load_token(root)
     if token:
@@ -176,6 +184,7 @@ def call_remote_streaming(
     on_progress=None,
     on_status=None,
     plan: str | None = None,
+    max_budget_usd: float | None = None,
 ) -> dict[str, Any]:
     """Like call_remote, but streams live output while the task runs.
 
@@ -220,6 +229,8 @@ def call_remote_streaming(
         payload["idempotency_key"] = idempotency_key
     if plan is not None:
         payload["plan"] = plan
+    if max_budget_usd is not None:
+        payload["max_budget_usd"] = float(max_budget_usd)
     token = _load_token(root)
     if token:
         payload["token"] = token

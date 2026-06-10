@@ -469,7 +469,30 @@ cd "$WORKDIR" || { log "cannot cd to $WORKDIR"; exit 1; }
 #   CLAUDE_FLAGS="--allowedTools Edit,Write,Read,Glob,Grep" # edits only, no shell
 # Unset = full agent. The prompt + output format are always appended.
 read -r -a EXTRA_FLAGS <<< "${CLAUDE_FLAGS:-}"
-exec "$CLAUDE_BIN" "${EXTRA_FLAGS[@]}" -p "$TASK" --output-format text
+
+# ── Budget cap ────────────────────────────────────────────────────────────────
+# MAX_BUDGET_USD: per-task spend ceiling passed in by the client.
+# BRIDGE_MAX_BUDGET_USD: owner-set global ceiling (env / launchd unit).
+# Rule: the effective ceiling = min(caller_value, owner_ceiling).
+# If the owner sets BRIDGE_MAX_BUDGET_USD=5.00 and Cowork sends 10.00,
+# the task is capped at $5. If Cowork sends 1.00, it's capped at $1.
+BUDGET_FLAGS=()
+CALLER_BUDGET="${MAX_BUDGET_USD:-}"
+OWNER_CEILING="${BRIDGE_MAX_BUDGET_USD:-}"
+
+if [[ -n "$OWNER_CEILING" && -n "$CALLER_BUDGET" ]]; then
+  # Both set — use the smaller of the two.
+  # Use awk for float comparison (bash can't do it natively).
+  EFFECTIVE=$(awk -v a="$CALLER_BUDGET" -v b="$OWNER_CEILING" \
+    'BEGIN { print (a < b) ? a : b }')
+  BUDGET_FLAGS=(--max-budget-usd "$EFFECTIVE")
+elif [[ -n "$CALLER_BUDGET" ]]; then
+  BUDGET_FLAGS=(--max-budget-usd "$CALLER_BUDGET")
+elif [[ -n "$OWNER_CEILING" ]]; then
+  BUDGET_FLAGS=(--max-budget-usd "$OWNER_CEILING")
+fi
+
+exec "$CLAUDE_BIN" "${EXTRA_FLAGS[@]}" "${BUDGET_FLAGS[@]}" -p "$TASK" --output-format text
 RUNCLAUDE
 chmod +x "$BRIDGE_ROOT/scripts/run_claude.sh"
 
@@ -1166,6 +1189,11 @@ print(r["exit_code"]); print(r["stdout"])
 \`\`\`
 Always pass a unique \`idempotency_key\` — Claude Code tasks have side effects, so a
 retry must not run twice.
+
+### Per-task cost cap
+Pass \`max_budget_usd=2.00\` to stop the agent when that amount is spent.
+The owner can set \`BRIDGE_MAX_BUDGET_USD\` as a global ceiling that can never
+be exceeded regardless of what Cowork sends (effective = min(caller, owner)).
 
 ## Step 3 — quick system checks (no agent)
 \`call_remote("scripts/mac_health.sh")\` · \`mac_ram.sh\` · \`mac_disk.sh\` · \`mac_top.sh\` · \`mac_network.sh\` · \`port_check.sh\` · \`docker_ps.sh\` · \`docker_logs.sh\` · \`pkg_outdated.sh\` · \`git_status.sh <path>\`

@@ -74,6 +74,7 @@ def call_remote(
     bridge_root: Path | str | None = None,
     idempotency_key: str | None = None,
     plan: str | None = None,
+    max_budget_usd: float | None = None,
 ) -> dict[str, Any]:
     """Submit a script invocation to the Mac daemon and wait for its result.
 
@@ -84,6 +85,9 @@ def call_remote(
       - exit_code -4 = daemon crashed mid-run; treat as indeterminate.
       - `plan` is an optional plain-English description of what the task will do.
         If approve_plan.sh exists on the machine the daemon runs it first.
+      - `max_budget_usd` sets a per-task spend ceiling for run_claude.sh calls.
+        The owner's BRIDGE_MAX_BUDGET_USD is a hard upper limit; if both are set
+        the daemon uses min(max_budget_usd, BRIDGE_MAX_BUDGET_USD).
     Raises TimeoutError if the daemon doesn't respond within timeout + 5s.
     """
     root = Path(bridge_root) if bridge_root else _resolve_bridge_root()
@@ -108,6 +112,8 @@ def call_remote(
         payload["idempotency_key"] = idempotency_key
     if plan is not None:
         payload["plan"] = plan
+    if max_budget_usd is not None:
+        payload["max_budget_usd"] = float(max_budget_usd)
 
     token = _load_token(root)
     if token:
@@ -140,7 +146,7 @@ def call_remote(
 def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
                           cwd=None, env=None, bridge_root=None,
                           idempotency_key=None, on_progress=None, on_status=None,
-                          plan=None) -> dict[str, Any]:
+                          plan=None, max_budget_usd=None) -> dict[str, Any]:
     """Like call_remote, but streams live output while the task runs.
 
     The daemon tees the script's output to progress/<id>.log; this polls it and
@@ -167,6 +173,7 @@ def call_remote_streaming(script, args=None, timeout=600, poll_interval=1.0,
     if env: payload["env"] = env
     if idempotency_key: payload["idempotency_key"] = idempotency_key
     if plan is not None: payload["plan"] = plan
+    if max_budget_usd is not None: payload["max_budget_usd"] = float(max_budget_usd)
     token = _load_token(root)
     if token: payload["token"] = token
     cmd_file = queue / f"{cmd_id}.json"

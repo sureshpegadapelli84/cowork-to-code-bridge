@@ -119,4 +119,22 @@ cd "$WORKDIR" || { log "cannot cd to $WORKDIR"; exit 1; }
 # always appended and can't be overridden.
 read -r -a EXTRA_FLAGS <<< "${CLAUDE_FLAGS:-}"
 
-exec "$CLAUDE_BIN" "${EXTRA_FLAGS[@]}" -p "$TASK" --output-format text
+# ── Budget cap ────────────────────────────────────────────────────────────────
+# MAX_BUDGET_USD: per-task ceiling set by the caller (injected via daemon env).
+# BRIDGE_MAX_BUDGET_USD: owner-set global ceiling (launchd/systemd env var).
+# Effective ceiling = min(caller, owner). Owner always wins if caller is higher.
+BUDGET_FLAGS=()
+CALLER_BUDGET="${MAX_BUDGET_USD:-}"
+OWNER_CEILING="${BRIDGE_MAX_BUDGET_USD:-}"
+
+if [[ -n "$OWNER_CEILING" && -n "$CALLER_BUDGET" ]]; then
+  EFFECTIVE=$(awk -v a="$CALLER_BUDGET" -v b="$OWNER_CEILING" \
+    'BEGIN { print (a < b) ? a : b }')
+  BUDGET_FLAGS=(--max-budget-usd "$EFFECTIVE")
+elif [[ -n "$CALLER_BUDGET" ]]; then
+  BUDGET_FLAGS=(--max-budget-usd "$CALLER_BUDGET")
+elif [[ -n "$OWNER_CEILING" ]]; then
+  BUDGET_FLAGS=(--max-budget-usd "$OWNER_CEILING")
+fi
+
+exec "$CLAUDE_BIN" "${EXTRA_FLAGS[@]}" "${BUDGET_FLAGS[@]}" -p "$TASK" --output-format text

@@ -69,6 +69,12 @@ COWORK_RESULTS = BRIDGE_ROOT / "cowork_results"  # replies Cowork writes back
 JOURNAL = BRIDGE_ROOT / "journal.log"
 POLL_SEC = float(os.environ.get("BRIDGE_POLL_SEC", "1.0"))
 MAX_TIMEOUT_SEC = int(os.environ.get("BRIDGE_MAX_TIMEOUT", "600"))
+# Owner-set per-task budget ceiling for run_claude.sh calls.
+# If set, daemon injects MAX_BUDGET_USD into the script env and run_claude.sh
+# passes it to `claude --max-budget-usd`.  The script also reads
+# BRIDGE_MAX_BUDGET_USD so the owner ceiling can never be exceeded regardless
+# of what the caller sends.
+_MAX_BUDGET_USD_STR: str | None = os.environ.get("BRIDGE_MAX_BUDGET_USD") or None
 ALLOW_UNAUTH = os.environ.get("BRIDGE_ALLOW_UNAUTH") == "1"
 JOURNAL_WARN_BYTES = 10 * 1024 * 1024  # warn at 10 MB
 JOURNAL_ROTATE_BYTES = 50 * 1024 * 1024  # rotate at 50 MB (keep one .old)
@@ -526,10 +532,31 @@ def run_one(cmd_path: Path, token_required: str | None,
         if k not in env:          # owner var wins; caller can only add new ones
             env[k] = str(v)
         elif k.upper() in ("CLAUDE_FLAGS", "BRIDGE_TOKEN", "BRIDGE_ROOT",
-                           "BRIDGE_ALLOW_UNAUTH", "BRIDGE_MAX_TIMEOUT"):
+                           "BRIDGE_ALLOW_UNAUTH", "BRIDGE_MAX_TIMEOUT",
+                           "BRIDGE_MAX_BUDGET_USD"):
             log(f"  ! blocked caller attempt to override protected env var: {k}")
         else:
             env[k] = str(v)       # non-security vars: caller wins (e.g. PYTHONPATH)
+
+    # ── Budget cap injection ──────────────────────────────────────────────────
+    # Inject MAX_BUDGET_USD from the command payload into the script environment
+    # so run_claude.sh can forward it to `claude --max-budget-usd`.
+    # The owner ceiling (BRIDGE_MAX_BUDGET_USD) is also forwarded so run_claude.sh
+    # can apply min(caller, owner) itself — this gives the script full context.
+    # MAX_BUDGET_USD from the caller is validated to be a positive float; invalid
+    # values are ignored (logged) so a bad payload can't crash the daemon.
+    caller_budget_raw = cmd.get("max_budget_usd")
+    if caller_budget_raw is not None:
+        try:
+            caller_budget = float(caller_budget_raw)
+            if caller_budget <= 0:
+                raise ValueError("must be positive")
+            env["MAX_BUDGET_USD"] = f"{caller_budget:.4f}"
+        except (TypeError, ValueError) as exc:
+            log(f"  ! ignoring invalid max_budget_usd={caller_budget_raw!r}: {exc}")
+    if _MAX_BUDGET_USD_STR:
+        # Always forward the owner ceiling so run_claude.sh can enforce it.
+        env["BRIDGE_MAX_BUDGET_USD"] = _MAX_BUDGET_USD_STR
 
     # ─── in-flight marker + journal: started ──────────────────────────────────
     # Marker is written BEFORE subprocess.run. If we crash between this point
