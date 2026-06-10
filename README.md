@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/abhinaykrupa/cowork-to-code-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/abhinaykrupa/cowork-to-code-bridge/actions/workflows/ci.yml)
 [![selfcheck](https://github.com/abhinaykrupa/cowork-to-code-bridge/actions/workflows/ci.yml/badge.svg?label=selfcheck)](https://github.com/abhinaykrupa/cowork-to-code-bridge/actions/workflows/ci.yml)
+[![Homebrew](https://img.shields.io/badge/brew-abhinaykrupa%2Ftap-orange?logo=homebrew)](https://github.com/abhinaykrupa/homebrew-tap)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue?logo=python&logoColor=white)](https://pypi.org/project/cowork-to-code-bridge/)
 [![PyPI](https://img.shields.io/pypi/v/cowork-to-code-bridge)](https://pypi.org/project/cowork-to-code-bridge/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/cowork-to-code-bridge)](https://pypi.org/project/cowork-to-code-bridge/)
@@ -47,6 +48,12 @@ Because Claude Code can run things on your Mac, a useful **side benefit** is tha
 **Step 1 — on your machine (once).** Open Terminal (`Cmd + Space` → **Terminal**), paste this, press Enter:
 
 ```bash
+# Homebrew (macOS recommended)
+brew tap abhinaykrupa/tap
+brew install cowork-to-code-bridge
+brew services start cowork-to-code-bridge
+
+# or: one-liner (macOS + Linux + WSL2)
 curl -fsSL https://raw.githubusercontent.com/abhinaykrupa/cowork-to-code-bridge/main/install.sh | bash
 ```
 
