@@ -254,8 +254,14 @@ def _drain_stale_queue(terminal: dict[str, str]) -> None:
             f.rename(PROCESSED / f.name)
 
 
-def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
-                   timeout: int, progress_file: Path) -> dict[str, Any]:
+def _run_streaming(
+    argv: list[str],
+    cwd: str,
+    env: dict[str, str],
+    timeout: int,
+    progress_file: Path,
+    status_file: Path | None = None,
+) -> dict[str, Any]:
     """Run a subprocess, teeing stdout+stderr to progress_file line-by-line.
 
     Returns the same result dict shape as the old subprocess.run path:
@@ -265,23 +271,64 @@ def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
 
     The progress file is a best-effort live view (the client tails it). The
     authoritative output is the captured stdout/stderr returned here.
+
+    If status_file is given, a background thread writes it every ~2 s:
+      {"elapsed_s": 42, "last_line": "Running npm test…", "state": "running"}
+    Finalized with state "done" or "error" when the script exits. Written
+    atomically (.tmp → rename) so the client never reads a partial file.
     """
     out_buf: list[str] = []
     err_buf: list[str] = []
+    last_out_line: list[str] = [""]   # single-element list — shared across threads
+    t_start = time.monotonic()
+
     # Truncate/create the progress file at start.
     with contextlib.suppress(OSError):
         progress_file.write_text("")
 
     def _tee(stream, buf, tag):
-        # Read line-by-line; append to in-memory buffer AND the progress file.
         try:
             for line in iter(stream.readline, ""):
                 buf.append(line)
+                stripped = line.strip()
+                if stripped and tag == "out":
+                    last_out_line[0] = stripped
                 with contextlib.suppress(OSError), progress_file.open("a") as pf:
                     pf.write(line if tag == "out" else f"[stderr] {line}")
         finally:
             with contextlib.suppress(Exception):
                 stream.close()
+
+    # ------------------------------------------------------------------ #
+    # Status writer — optional background ticker                           #
+    # ------------------------------------------------------------------ #
+    stop_status = threading.Event()
+
+    def _write_status(state: str, exit_code: int | None = None) -> None:
+        if status_file is None:
+            return
+        payload: dict[str, Any] = {
+            "elapsed_s": int(time.monotonic() - t_start),
+            "last_line": last_out_line[0],
+            "state": state,
+        }
+        if exit_code is not None:
+            payload["exit_code"] = exit_code
+        tmp = status_file.with_suffix(".json.tmp")
+        with contextlib.suppress(OSError):
+            tmp.write_text(json.dumps(payload))
+            tmp.rename(status_file)
+
+    def _status_ticker() -> None:
+        while not stop_status.wait(timeout=2.0):
+            _write_status("running")
+
+    t_status: threading.Thread | None = None
+    if status_file is not None:
+        with contextlib.suppress(OSError):
+            status_file.parent.mkdir(parents=True, exist_ok=True)
+        t_status = threading.Thread(target=_status_ticker, daemon=True)
+        t_status.start()
 
     try:
         proc = subprocess.Popen(
@@ -289,6 +336,9 @@ def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
             text=True, cwd=cwd, env=env, bufsize=1,
         )
     except Exception as e:
+        stop_status.set()
+        if t_status:
+            t_status.join(timeout=3)
         return {"exit_code": -3, "error": str(e)}
 
     t_out = threading.Thread(target=_tee, args=(proc.stdout, out_buf, "out"), daemon=True)
@@ -303,6 +353,10 @@ def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
         proc.wait()
         t_out.join(timeout=2)
         t_err.join(timeout=2)
+        stop_status.set()
+        if t_status:
+            t_status.join(timeout=3)
+        _write_status("error", -2)
         return {
             "exit_code": -2,
             "error": f"timeout after {timeout}s",
@@ -312,8 +366,13 @@ def _run_streaming(argv: list[str], cwd: str, env: dict[str, str],
 
     t_out.join(timeout=5)
     t_err.join(timeout=5)
+    stop_status.set()
+    if t_status:
+        t_status.join(timeout=3)
+    rc = proc.returncode
+    _write_status("done" if rc == 0 else "error", rc)
     return {
-        "exit_code": proc.returncode,
+        "exit_code": rc,
         "stdout": "".join(out_buf)[-65536:],
         "stderr": "".join(err_buf)[-65536:],
     }
@@ -450,7 +509,8 @@ def run_one(cmd_path: Path, token_required: str | None,
     # blind for the final result. The progress file is best-effort and append-
     # only; the authoritative result is still the result JSON written below.
     progress_file = PROGRESS / f"{cmd_id}.log"
-    result = _run_streaming(argv, cwd, env, timeout, progress_file)
+    status_file = PROGRESS / f"{cmd_id}.status.json"
+    result = _run_streaming(argv, cwd, env, timeout, progress_file, status_file)
 
     # Order matters: result file first (durable), then journal completed (so
     # recovery sees terminal status), then clear in-flight marker, then move
@@ -461,8 +521,9 @@ def run_one(cmd_path: Path, token_required: str | None,
     if idem_key:
         idem_cache.setdefault(idem_key, result)
     _inflight_clear(cmd_id)
-    # The result file is now authoritative; drop the live progress file.
+    # The result file is now authoritative; drop the live progress files.
     (PROGRESS / f"{cmd_id}.log").unlink(missing_ok=True)
+    (PROGRESS / f"{cmd_id}.status.json").unlink(missing_ok=True)
     cmd_path.rename(PROCESSED / cmd_path.name)
     log(f"  ✓ {cmd_id}: exit={result['exit_code']}")
 
